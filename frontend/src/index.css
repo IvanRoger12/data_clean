@@ -2,4 +2,17 @@
 @tailwind components;
 @tailwind utilities;
 
-* { box-sizing: border-box; }
+/* Layout */
+html, body, #root { height: 100%; }
+body { @apply bg-gray-950 text-white; }
+
+/* Reusable */
+.card { @apply bg-gradient-to-br from-gray-900 to-gray-800 border border-gray-700 rounded-2xl; }
+.btn { @apply px-4 py-2 rounded-xl font-medium transition-colors; }
+.btn-primary { @apply btn bg-blue-600 hover:bg-blue-700 text-white; }
+.btn-ghost { @apply btn bg-gray-800 hover:bg-gray-700 text-white; }
+.badge { @apply inline-flex items-center px-2 py-0.5 text-xs rounded-full border; }
+
+/* Scrollbar */
+*::-webkit-scrollbar { width: 10px; height: 10px; }
+*::-webkit-scrollbar-thumb { background: #2f3341; border-radius: 999px; }
