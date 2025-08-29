@@ -1,607 +1,673 @@
-import React, { useState, useCallback, useRef, useEffect } from "react";
+import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
-  Upload, FileText, BarChart3, Calendar, Settings, Download, Play, Clock, CheckCircle,
-  XCircle, Crown, Globe, RefreshCw, Bot, Brain, Sparkles, MessageCircle, Zap,
-  Target, ArrowRight, Eye, TrendingUp
+  Upload, FileText, BarChart3, Calendar, Settings, Download, Play,
+  Clock, CheckCircle, XCircle, Crown, Globe, RefreshCw, Eye, TrendingUp,
+  Sparkles, MessageCircle, Zap, Target, ArrowRight, ShieldCheck, Wand2, ListChecks
 } from "lucide-react";
-import { getJSON, postJSON, postForm } from "../lib/api";
+import { api } from "../utils/api";
+import { arrayToCSV, downloadText } from "../utils/csv";
+import { buildPdfReport } from "../utils/pdf";
+import type { Preview, KPI } from "../types";
 
-type Preview = { columns: string[]; data: string[][]; totalRows: number; totalCols: number; fileName?: string; };
-type KPI = { rows: number; cols: number; dupPct: number; anomalies?: number; qualityScore: number; };
-type AnalysisColumn = { name: string; type: string; quality: number; issues: number; missing: number; invalid: number; aiSuggestion: string; corrections: {row:number; old:string; new:string; confidence:number}[]; };
-type AnalysisData = { globalScore: number; improvements: number; columns: AnalysisColumn[]; insights: {type:string;title:string;message:string;priority:string}[]; };
+type Props = { lang: "fr" | "en" };
 
-const DataCleaningAgent: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<"analyze"|"schedule"|"jobs">("analyze");
-  const [language, setLanguage] = useState<"fr"|"en">("fr");
+const TXT = {
+  fr: {
+    tabs: { analyze: "Analyser", dedupe: "Dédoublonner", rules: "Règles", schedule: "Planifier", jobs: "Jobs" },
+    drop: "Déposez vos fichiers ou cliquez ici",
+    formats: "CSV, Excel, JSON, TXT",
+    max: "Taille max: 50 Mo",
+    free: "Analyse gratuite - 1000 lignes",
+    privacy: "Traitement local sécurisé",
+    start: "Commencer l'analyse IA",
+    insights: "Insights IA",
+    aiThinking: "L'IA réfléchit...",
+    autoMode: "Mode Auto (fixes sûrs)",
+    diff: "Diff & validations",
+    export: { csv: "CSV (échantillon)", pdf: "Rapport PDF", ics: "Télécharger .ICS" },
+    dedupe: { title: "Fuzzy Dedupe", keys: "Clés composites", threshold: "Seuil de similarité", run: "Détecter", pairs: "Paires détectées" },
+    rules: { title: "Rule Builder", required: "Obligatoire", regex: "Regex", presets: "Presets", save: "Sauvegarder règles" },
+    schedule: { title: "Planification", rule: "Règle ICS (ex: DAILY 09:00)", gen: "Générer .ICS" },
+    jobs: { title: "Gestion des Jobs" },
+  },
+  en: {
+    tabs: { analyze: "Analyze", dedupe: "Dedupe", rules: "Rules", schedule: "Schedule", jobs: "Jobs" },
+    drop: "Drop your files here or click",
+    formats: "CSV, Excel, JSON, TXT",
+    max: "Max size: 50 MB",
+    free: "Free analysis - 1000 rows",
+    privacy: "Secure local processing",
+    start: "Start AI Analysis",
+    insights: "AI Insights",
+    aiThinking: "AI is thinking...",
+    autoMode: "Auto Mode (safe fixes)",
+    diff: "Diff & validations",
+    export: { csv: "CSV (sample)", pdf: "PDF Report", ics: "Download .ICS" },
+    dedupe: { title: "Fuzzy Dedupe", keys: "Composite keys", threshold: "Similarity threshold", run: "Detect", pairs: "Pairs detected" },
+    rules: { title: "Rule Builder", required: "Required", regex: "Regex", presets: "Presets", save: "Save rules" },
+    schedule: { title: "Schedule", rule: "ICS Rule (e.g., DAILY 09:00)", gen: "Generate .ICS" },
+    jobs: { title: "Jobs" },
+  }
+};
+
+const PRESETS = [
+  { name: "Emails essentiels", rules: [{ column: "email", required: true, regex: "^[^@\\s]+@[^@\\s]+\\.[^@\\s]+$" }] },
+  { name: "Téléphones E.164", rules: [{ column: "phone", required: false, regex: "^\\+\\d{8,15}$" }] },
+  { name: "Dates ISO", rules: [{ column: "date_created", required: false, regex: "^\\d{4}-\\d{2}-\\d{2}$" }] },
+];
+
+export default function DataCleaningAgent({ lang }: Props) {
+  const t = TXT[lang];
+  const [active, setActive] = useState<"analyze" | "dedupe" | "rules" | "schedule" | "jobs">("analyze");
   const [file, setFile] = useState<File | null>(null);
-  const [previewData, setPreviewData] = useState<Preview | null>(null);
-  const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
-  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [preview, setPreview] = useState<Preview | null>(null);
+  const [detected, setDetected] = useState<Record<string, string>>({});
+  const [kpi, setKpi] = useState<KPI | null>(null);
+  const [insights, setInsights] = useState<string[]>([]);
+  const [isAnalyzing, setAnalyzing] = useState(false);
   const [analysisStep, setAnalysisStep] = useState("");
-  const [showUpgradeModal, setShowUpgradeModal] = useState(false);
-  const [aiChatOpen, setAiChatOpen] = useState(false);
-  const [aiMessages, setAiMessages] = useState<{role:"user"|"assistant"; message:string; timestamp:number}[]>([]);
-  const [aiInput, setAiInput] = useState("");
   const [aiThinking, setAiThinking] = useState(false);
   const [autoMode, setAutoMode] = useState(true);
-  const [autoFixResult, setAutoFixResult] = useState<any>(null);
-  const [icsContent, setIcsContent] = useState("");
-  const [jobs, setJobs] = useState<any[]>([]);
+  const [autoFix, setAutoFix] = useState<{ cleaned_preview?: Record<string, any>[]; diff_sample?: any[]; removed_exact_duplicates?: number } | null>(null);
+
+  // Dedupe UI
+  const [dupeKeys, setDupeKeys] = useState<string[]>([]);
+  const [dupeThreshold, setDupeThreshold] = useState(90);
+  const [dupePairs, setDupePairs] = useState<{ i: number; j: number; score: number }[]>([]);
+
+  // Rules UI
+  const [rules, setRules] = useState<{ column: string; required?: boolean; regex?: string }[]>(() => {
+    const raw = localStorage.getItem("dca_rules");
+    return raw ? JSON.parse(raw) : [];
+  });
+
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const texts = {
-    fr: {
-      title: "DataClean AI",
-      subtitle: "Assistant IA pour nettoyage de données d'entreprise",
-      tabs: { analyze: "Analyser", schedule: "Planifier", jobs: "Jobs" },
-      upload: { title: "Déposez vos fichiers ou cliquez ici", formats: "CSV, Excel, JSON, TXT, YAML", maxSize: "Taille max: 50 Mo", freeLimit: "Analyse gratuite - 1000 lignes", privacy: "Traitement sécurisé" },
-      preview: { title: "Aperçu des données", rows: "lignes", columns: "colonnes", startAnalysis: "Commencer l'analyse IA" }
-    },
-    en: {
-      title: "DataClean AI",
-      subtitle: "AI Assistant for Enterprise Data Cleaning",
-      tabs: { analyze: "Analyze", schedule: "Schedule", jobs: "Jobs" },
-      upload: { title: "Drop your files here or click", formats: "CSV, Excel, JSON, TXT, YAML", maxSize: "Max size: 50 MB", freeLimit: "Free analysis - 1k rows", privacy: "Secure processing" },
-      preview: { title: "Data Preview", rows: "rows", columns: "columns", startAnalysis: "Start AI Analysis" }
-    }
-  };
-  const t = texts[language];
+  const headers = preview?.columns || [];
+  const previewRecords = useMemo(() => {
+    if (!preview) return [];
+    return preview.data.map((row) => {
+      const obj: Record<string, any> = {};
+      row.forEach((val, i) => (obj[headers[i]] = val));
+      return obj;
+    });
+  }, [preview, headers]);
 
-  const onDrop = useCallback((e: React.DragEvent<HTMLDivElement>) => {
+  const onDrop = useCallback((e: React.DragEvent) => {
     e.preventDefault();
     const files = e.dataTransfer.files;
-    if (files && files[0]) handleFileUpload(files[0]);
+    if (files && files[0]) handleUpload(files[0]);
   }, []);
 
-  const handleFileUpload = (f: File) => {
+  async function handleUpload(f: File) {
     setFile(f);
-    setPreviewData(null);
-    setAnalysisData(null);
-    setAutoFixResult(null);
-    setAiMessages(prev => [...prev, { role: "assistant", message: language==="fr" ? `Fichier "${f.name}" prêt. Clique "${t.preview.startAnalysis}".` : `File "${f.name}" ready. Click "${t.preview.startAnalysis}".`, timestamp: Date.now() }]);
-  };
+    setPreview(null);
+    setDetected({});
+    setKpi(null);
+    setInsights([]);
+    setAutoFix(null);
+    setDupePairs([]);
+    setActive("analyze");
 
-  async function startAnalysis() {
-    if (!file) return;
-    setIsAnalyzing(true);
-    setAnalysisStep(language==="fr" ? "Lecture du fichier..." : "Reading file...");
-
+    setAnalysisStep("Upload...");
     try {
-      const fd = new FormData();
-      fd.append("file", file);
+      const res = await api.analyze(f);
+      setPreview(res.preview);
+      setKpi(res.kpi);
+      setDetected(res.detected || {});
+      setAnalysisStep("Analyse IA...");
+      setAnalyzing(true);
 
-      // 1) Analyse de base
-      const res = await postForm<{ preview:Preview; kpi:KPI; profile:any; detected:Record<string,string> }>("/api/analyze", fd);
-      setPreviewData({ ...res.preview });
-
-      // 2) Insights IA
-      setAnalysisStep(language==="fr" ? "Génération des insights..." : "Generating insights...");
-      const insightsRes = await postJSON<{insights:string[]}>("/api/insights", {
-        profile: res.profile,
-        kpi: res.kpi,
-        prompt: language==="fr" ? "Quelles priorités de correction ?" : "Top cleaning priorities?"
-      });
-
-      // 3) Map vers structure UI
-      const mapped: AnalysisData = {
-        globalScore: Math.round(res.kpi.qualityScore ?? 70),
-        improvements: Math.max(0, 100 - Math.round(res.kpi.qualityScore ?? 70)),
-        columns: Object.keys(res.detected).map((name) => ({
-          name,
-          type: res.detected[name],
-          quality: 70,
-          issues: 0,
-          missing: res.profile?.columns?.[name]?.missingPct ?? 0,
-          invalid: 0,
-          aiSuggestion: language==="fr" ? `Standardiser "${name}" (${res.detected[name]}).` : `Standardize "${name}" (${res.detected[name]}).`,
-          corrections: []
-        })),
-        insights: (insightsRes.insights || []).map((m) => ({ type:"quality", title:"Insight", message: m, priority:"medium" }))
-      };
-      setAnalysisData(mapped);
-
-      // 4) Mode Auto (fixes sûrs)
-      if (autoMode) {
-        setAnalysisStep(language==="fr" ? "Application des fixes sûrs..." : "Applying safe fixes...");
-        const auto = await postForm("/api/tools/auto_fix", fd, { region: "FR" });
-        setAutoFixResult(auto);
-
-        // Injecter un aperçu des corrections dans les colonnes
-        const byCol: Record<string, any[]> = {};
-        (auto.diff_sample || []).forEach((d: any) => {
-          byCol[d.column] = byCol[d.column] || [];
-          byCol[d.column].push({ row: d.row, old: d.old, new: d.new, confidence: 90 });
-        });
-        setAnalysisData((prev) => prev ? {
-          ...prev,
-          columns: prev.columns.map((c) => byCol[c.name]?.length ? { ...c, corrections: byCol[c.name].slice(0,5) } : c)
-        } : prev);
+      // Insights (LLM)
+      setAiThinking(true);
+      try {
+        const ii = await api.insights(res.profile, res.kpi);
+        setInsights(ii.insights || []);
+      } catch (err) {
+        setInsights(["LLM indisponible. Affichage des heuristiques."]);
+      } finally {
+        setAiThinking(false);
       }
 
-      setAiMessages(prev => [...prev, { role:"assistant", message: language==="fr" ? `Analyse terminée. Score: ${mapped.globalScore}%` : `Analysis done. Score: ${mapped.globalScore}%`, timestamp: Date.now() }]);
-      setAiChatOpen(true);
-    } catch (e:any) {
-      setAiMessages(prev => [...prev, { role:"assistant", message: (language==="fr" ? "Erreur d'analyse: " : "Analysis error: ") + (e?.message || e), timestamp: Date.now() }]);
+      // Auto-fix si activé
+      if (autoMode) {
+        setAnalysisStep("Auto-fix (trim, ISO date, E.164, dedup exact)...");
+        try {
+          const fx = await api.autoFix(f);
+          setAutoFix(fx);
+        } catch (e: any) {
+          console.warn("AutoFix error", e?.message);
+        }
+      }
+
+      setAnalysisStep("Terminé");
+    } catch (e: any) {
+      alert("Erreur d'analyse: " + e?.message);
     } finally {
-      setIsAnalyzing(false);
-      setAnalysisStep("");
+      setAnalyzing(false);
     }
   }
 
-  function downloadCSVFromCleanedPreview() {
-    if (!autoFixResult?.cleaned_preview) return;
-    const rows = autoFixResult.cleaned_preview as Record<string,string>[];
-    const cols = rows.length ? Object.keys(rows[0]) : [];
-    const csv = [
-      cols.join(","),
-      ...rows.map(r => cols.map(c => `"${String(r[c] ?? "").replace(/"/g,'""')}"`).join(","))
-    ].join("\n");
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url; a.download = "dataclean_cleaned.csv"; a.click();
-    URL.revokeObjectURL(url);
+  function renderTable() {
+    if (!preview) return null;
+    return (
+      <div className="bg-gray-950 rounded-xl overflow-hidden border border-gray-700">
+        <div className="bg-gray-800 px-6 py-3 border-b border-gray-700 flex items-center justify-between">
+          <h4 className="font-medium text-gray-200">Aperçu</h4>
+          <span className="text-xs text-gray-400">{preview.totalRows} lignes • {preview.totalCols} colonnes</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full">
+            <thead className="bg-gray-900">
+              <tr>
+                {headers.map((h) => (
+                  <th key={h} className="px-4 py-3 text-left text-sm font-medium text-gray-300 border-r border-gray-700 last:border-r-0">
+                    <div className="flex items-center gap-2">
+                      <span>{h}</span>
+                      {detected[h] && (
+                        <span className="badge border-blue-500 text-blue-300">{detected[h]}</span>
+                      )}
+                      {rules.find(r => r.column === h && (r.required || r.regex)) && (
+                        <span className="badge border-purple-500 text-purple-300">rule</span>
+                      )}
+                    </div>
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-800">
+              {preview.data.map((row, i) => (
+                <tr key={i} className="hover:bg-gray-900/50 transition-colors">
+                  {row.map((cell, j) => {
+                    const col = headers[j];
+                    const rule = rules.find(r => r.column === col);
+                    let invalid = false;
+                    if (rule?.required && (cell === "" || cell === null || cell === undefined)) invalid = true;
+                    if (rule?.regex) {
+                      try { if (!new RegExp(rule.regex).test(String(cell ?? ""))) invalid = true; }
+                      catch { /* ignore bad regex */ }
+                    }
+                    return (
+                      <td key={j} className={`px-4 py-3 text-sm border-r border-gray-800 last:border-r-0 font-mono ${invalid ? "text-red-300 bg-red-900/10" : "text-gray-300"}`}>
+                        {String(cell ?? "") || <span className="text-gray-600 italic">null</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div className="bg-gray-800 px-6 py-3 text-sm text-gray-400 border-t border-gray-700">
+          Affichage de {preview.data.length} lignes sur {preview.totalRows} total
+        </div>
+      </div>
+    );
   }
 
-  async function generateICS(rule: string) {
+  function exportPDF() {
+    if (!kpi) return;
+    const doc = buildPdfReport({
+      fileName: preview?.fileName,
+      kpi,
+      insights,
+      diffSample: autoFix?.diff_sample,
+      cleanedPreview: autoFix?.cleaned_preview
+    });
+    doc.save(`DataClean_Report_${Date.now()}.pdf`);
+  }
+
+  function exportCSVSample() {
+    if (!autoFix?.cleaned_preview?.length) {
+      alert("Aucun échantillon nettoyé disponible (lancez l'auto-fix).");
+      return;
+    }
+    const csv = arrayToCSV(autoFix.cleaned_preview);
+    downloadText("cleaned_sample.csv", csv, "text/csv");
+  }
+
+  function addRule() {
+    const column = prompt("Nom de la colonne ?");
+    if (!column) return;
+    const required = confirm("Rendre obligatoire ?");
+    const regex = prompt("Regex (laisser vide si non) ?");
+    const newRules = [...rules, { column, required, regex: regex || undefined }];
+    setRules(newRules);
+    localStorage.setItem("dca_rules", JSON.stringify(newRules));
+  }
+
+  function applyPreset(p: typeof PRESETS[number]) {
+    const merged = [...rules];
+    for (const r of p.rules) {
+      const idx = merged.findIndex(x => x.column === r.column);
+      if (idx >= 0) merged[idx] = { ...merged[idx], ...r };
+      else merged.push(r);
+    }
+    setRules(merged);
+    localStorage.setItem("dca_rules", JSON.stringify(merged));
+  }
+
+  async function runFuzzy() {
+    if (!dupeKeys.length) { alert("Choisis au moins une clé."); return; }
     try {
-      const res = await postJSON<{ics:string}>("/api/schedule/ics", { rule });
-      setIcsContent(res.ics || "");
-    } catch (e:any) {
-      setIcsContent(`Erreur: ${e?.message || e}`);
+      const rows = previewRecords.slice(0, 300); // échantillon pour vitesse
+      const res = await api.fuzzy(rows, dupeKeys, dupeThreshold);
+      setDupePairs(res.pairs);
+    } catch (e: any) {
+      alert("Erreur fuzzy: " + e?.message);
     }
   }
-
-  async function loadJobs() {
-    try {
-      const res = await getJSON<{jobs:any[]}>("/api/jobs");
-      setJobs(res.jobs || []);
-    } catch {
-      setJobs([]);
-    }
-  }
-  useEffect(() => { if (activeTab === "jobs") loadJobs(); }, [activeTab]);
-
-  const running = jobs.filter(j => j.status === "running").length;
-  const completed = jobs.filter(j => j.status === "completed").length;
-  const pending = jobs.filter(j => j.status === "pending").length;
-  const failed = jobs.filter(j => j.status === "failed").length;
 
   return (
-    <div className="min-h-screen bg-gray-950 text-white">
-      {/* Header */}
-      <header className="border-b border-gray-800 bg-gray-900/80 backdrop-blur-sm sticky top-0 z-40">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="w-12 h-12 bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl grid place-items-center">
-              <BarChart3 className="w-6 h-6" />
-            </div>
-            <div>
-              <h1 className="text-xl font-bold bg-gradient-to-r from-blue-400 to-purple-400 bg-clip-text text-transparent">DataClean AI</h1>
-              <p className="text-sm text-gray-400">{t.subtitle}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2 px-3 py-2 bg-gray-800 rounded-xl text-sm">
-              <Globe className="w-4 h-4" />
-              <select value={language} onChange={(e)=>setLanguage(e.target.value as any)} className="bg-transparent outline-none">
-                <option value="fr">FR</option>
-                <option value="en">EN</option>
-              </select>
-            </label>
-            <button onClick={()=>setShowUpgradeModal(true)} className="flex items-center gap-2 px-6 py-2 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-xl">
-              <Crown className="w-4 h-4" /><span>Pro</span>
-            </button>
-          </div>
-        </div>
-      </header>
-
-      {/* Tabs */}
-      <nav className="border-b border-gray-800 bg-gray-900/50">
-        <div className="max-w-7xl mx-auto px-6 flex gap-8">
+    <>
+      {/* Onglets */}
+      <nav className="border-b border-gray-800 bg-gray-900/50 -mt-4 -mx-6 px-6 mb-8">
+        <div className="flex space-x-8">
           {[
-            { id: "analyze", label: t.tabs.analyze, icon: BarChart3 },
-            { id: "schedule", label: t.tabs.schedule, icon: Calendar },
-            { id: "jobs", label: t.tabs.jobs, icon: Settings },
-          ].map((tab:any)=>(
-            <button key={tab.id} onClick={()=>setActiveTab(tab.id)} className={`flex items-center gap-2 py-4 border-b-2 text-sm ${activeTab===tab.id ? "border-blue-500 text-blue-400" : "border-transparent text-gray-400 hover:text-gray-200"}`}>
-              <tab.icon className="w-4 h-4" /><span>{tab.label}</span>
+            { id: "analyze", label: TXT[lang].tabs.analyze, icon: BarChart3 },
+            { id: "dedupe", label: TXT[lang].tabs.dedupe, icon: Target },
+            { id: "rules", label: TXT[lang].tabs.rules, icon: ListChecks },
+            { id: "schedule", label: TXT[lang].tabs.schedule, icon: Calendar },
+            { id: "jobs", label: TXT[lang].tabs.jobs, icon: Settings },
+          ].map((tab) => (
+            <button
+              key={tab.id}
+              onClick={() => setActive(tab.id as any)}
+              className={`flex items-center gap-2 py-4 px-1 border-b-2 text-sm font-medium transition-colors ${
+                active === tab.id
+                  ? "border-blue-500 text-blue-400"
+                  : "border-transparent text-gray-400 hover:text-gray-200"
+              }`}
+            >
+              <tab.icon className="w-4 h-4" />
+              <span>{tab.label}</span>
             </button>
           ))}
         </div>
       </nav>
 
-      {/* Main */}
-      <main className="max-w-7xl mx-auto px-6 py-8">
-        {activeTab==="analyze" && (
-          <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
-            <div className="xl:col-span-3 space-y-8">
-              {!file && !isAnalyzing && !analysisData && (
-                <div className="text-center">
-                  <div
-                    onDrop={onDrop}
-                    onDragOver={(e)=>e.preventDefault()}
-                    onClick={()=>fileInputRef.current?.click()}
-                    className="relative border-2 border-dashed border-gray-600 hover:border-blue-400 rounded-3xl p-16 cursor-pointer bg-gradient-to-br from-gray-900/50 to-gray-800/50"
-                  >
-                    <input ref={fileInputRef} type="file" className="hidden"
-                      accept=".csv,.xlsx,.xls,.json,.txt,.yaml"
-                      onChange={(e)=> e.target.files?.[0] && handleFileUpload(e.target.files[0])}/>
-                    <div className="w-24 h-24 bg-gradient-to-br from-blue-600/20 to-purple-600/20 rounded-2xl grid place-items-center mx-auto mb-6">
-                      <Upload className="w-12 h-12 text-blue-400" />
+      {/* ANALYZE */}
+      {active === "analyze" && (
+        <div className="grid grid-cols-1 xl:grid-cols-4 gap-8">
+          <div className="xl:col-span-3 space-y-8">
+            {!preview && !isAnalyzing && (
+              <div className="text-center">
+                <div
+                  onDrop={onDrop}
+                  onDragOver={(e) => e.preventDefault()}
+                  onClick={() => fileInputRef.current?.click()}
+                  className="relative border-2 border-dashed border-gray-600 hover:border-blue-400 rounded-3xl p-16 cursor-pointer transition-all duration-300 group bg-gradient-to-br from-gray-900/50 to-gray-800/50 backdrop-blur-sm"
+                >
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    className="hidden"
+                    accept=".csv,.xlsx,.xls,.json,.txt"
+                    onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])}
+                  />
+                  <div className="w-24 h-24 bg-gradient-to-br from-blue-600/20 to-purple-600/20 rounded-2xl flex items-center justify-center mx-auto mb-6 group-hover:scale-110 transition-transform duration-300">
+                    <Upload className="w-12 h-12 text-blue-400 group-hover:text-blue-300 transition-colors" />
+                  </div>
+                  <h3 className="text-2xl font-semibold text-white mb-3">{TXT[lang].drop}</h3>
+                  <p className="text-gray-400 mb-6">{TXT[lang].formats}</p>
+                  <div className="flex items-center justify-center gap-6 text-sm text-gray-500">
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-green-500 rounded-full"></div>
+                      <span>{TXT[lang].max}</span>
                     </div>
-                    <h3 className="text-2xl font-semibold mb-3">{t.upload.title}</h3>
-                    <p className="text-gray-400 mb-6">{t.upload.formats}</p>
-                    <div className="flex justify-center gap-8 text-sm text-gray-500">
-                      <div className="flex items-center gap-2"><div className="w-2 h-2 bg-green-500 rounded-full"></div><span>{t.upload.maxSize}</span></div>
-                      <div className="flex items-center gap-2"><div className="w-2 h-2 bg-blue-500 rounded-full"></div><span>{t.upload.freeLimit}</span></div>
-                      <div className="flex items-center gap-2"><div className="w-2 h-2 bg-purple-500 rounded-full"></div><span>{t.upload.privacy}</span></div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-blue-500 rounded-full"></div>
+                      <span>{TXT[lang].free}</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="w-2 h-2 bg-purple-500 rounded-full"></div>
+                      <span>{TXT[lang].privacy}</span>
                     </div>
                   </div>
                 </div>
-              )}
+              </div>
+            )}
 
-              {file && !isAnalyzing && !analysisData && (
-                <div className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl p-8 border border-gray-700">
+            {preview && (
+              <>
+                <div className="card p-6">
                   <div className="flex items-center justify-between mb-6">
                     <div className="flex items-center gap-4">
-                      <div className="w-12 h-12 bg-gradient-to-br from-green-600/20 to-blue-600/20 rounded-xl grid place-items-center">
-                        <FileText className="w-6 h-6 text-green-400"/>
+                      <div className="w-12 h-12 bg-gradient-to-br from-green-600/20 to-blue-600/20 rounded-xl flex items-center justify-center">
+                        <FileText className="w-6 h-6 text-green-400" />
                       </div>
                       <div>
-                        <h3 className="text-xl font-semibold">{file.name}</h3>
-                        <p className="text-gray-400">{(file.size/1024).toFixed(1)} KB</p>
+                        <h3 className="text-xl font-semibold text-white">{preview.fileName || "Fichier"}</h3>
+                        <p className="text-gray-400">{preview.totalRows} lignes • {preview.totalCols} colonnes</p>
                       </div>
                     </div>
-
-                    <div className="flex items-center gap-4">
-                      <label className="text-sm text-gray-400 flex items-center gap-2">
-                        <input type="checkbox" checked={autoMode} onChange={(e)=>setAutoMode(e.target.checked)} className="accent-purple-600"/>
-                        {language==='fr' ? 'Mode Auto (fixes sûrs)' : 'Auto Mode (safe fixes)'}
+                    <div className="flex items-center gap-3">
+                      <label className="flex items-center gap-2 text-sm text-gray-300 bg-gray-800 px-3 py-2 rounded-xl border border-gray-700">
+                        <ShieldCheck className="w-4 h-4 text-green-400" />
+                        <span>{TXT[lang].autoMode}</span>
+                        <input type="checkbox" className="accent-blue-500" checked={autoMode} onChange={e => setAutoMode(e.target.checked)} />
                       </label>
-                      <button onClick={startAnalysis} className="px-8 py-3 bg-gradient-to-r from-blue-600 to-purple-600 rounded-xl flex items-center gap-2">
-                        <Brain className="w-5 h-5" /><span>{t.preview.startAnalysis}</span>
+                      <button onClick={() => handleUpload(file!)} className="btn-primary flex items-center gap-2">
+                        <Wand2 className="w-4 h-4" />
+                        {TXT[lang].start}
                       </button>
                     </div>
                   </div>
-                  <p className="text-gray-400">{language==='fr'?'Clique pour lancer l’analyse IA.':'Click to start AI analysis.'}</p>
-                </div>
-              )}
 
-              {isAnalyzing && (
-                <div className="text-center py-20">
-                  <div className="w-20 h-20 bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl grid place-items-center mx-auto mb-8 animate-pulse">
-                    <Brain className="w-10 h-10" />
-                  </div>
-                  <h3 className="text-2xl font-semibold mb-4">{language==='fr'?"L'IA analyse vos données":"AI is analyzing your data"}</h3>
-                  <p className="text-blue-400 mb-8 text-lg">{analysisStep}</p>
-                  <div className="max-w-md mx-auto bg-gray-800 rounded-full h-3">
-                    <div className="bg-gradient-to-r from-blue-600 to-purple-600 h-3 rounded-full animate-pulse" style={{ width: '70%' }}></div>
-                  </div>
-                </div>
-              )}
-
-              {analysisData && (
-                <div className="space-y-8">
-                  {/* KPI header */}
-                  <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-8 border border-gray-700 flex items-center justify-between">
-                    <div>
-                      <h2 className="text-2xl font-bold mb-2">{language==='fr'?'Analyse Qualité':'Quality Analysis'}</h2>
-                      <p className="text-gray-400">{language==='fr'?'Évaluation complète par l’IA':'Full AI evaluation'}</p>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-5xl font-bold mb-2">{analysisData.globalScore}%</div>
-                      <div className="flex items-center text-green-400 font-medium">
-                        <TrendingUp className="w-4 h-4 mr-1" /> +{analysisData.improvements}%
+                  {kpi && (
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
+                      <div className="card p-4">
+                        <div className="text-gray-400 text-sm">Score</div>
+                        <div className="text-2xl font-bold">{kpi.qualityScore}%</div>
+                        <div className="text-green-400 text-xs flex items-center gap-1"><TrendingUp className="w-3 h-3" /> +possible</div>
                       </div>
-                    </div>
-                  </div>
-
-                  {/* Preview grid */}
-                  {previewData && (
-                    <div className="bg-gray-950 rounded-xl overflow-hidden border border-gray-700">
-                      <div className="bg-gray-800 px-6 py-3 border-b border-gray-700">
-                        <h4 className="font-medium">{t.preview.title} — {previewData.fileName || file?.name}</h4>
+                      <div className="card p-4">
+                        <div className="text-gray-400 text-sm">Lignes</div>
+                        <div className="text-2xl font-bold">{kpi.rows}</div>
                       </div>
-                      <div className="overflow-x-auto">
-                        <table className="w-full">
-                          <thead className="bg-gray-900">
-                            <tr>{previewData.columns.map((c, i)=><th key={i} className="px-4 py-3 text-left text-sm font-medium text-gray-300 border-r border-gray-700 last:border-r-0">{c}</th>)}</tr>
-                          </thead>
-                          <tbody className="divide-y divide-gray-800">
-                            {previewData.data.map((row, i)=>(
-                              <tr key={i} className="hover:bg-gray-900/50">
-                                {row.map((cell, j)=><td key={j} className="px-4 py-3 text-sm text-gray-300 border-r border-gray-800 last:border-r-0 font-mono">{cell || <span className="text-gray-600 italic">null</span>}</td>)}
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
+                      <div className="card p-4">
+                        <div className="text-gray-400 text-sm">Colonnes</div>
+                        <div className="text-2xl font-bold">{kpi.cols}</div>
                       </div>
-                      <div className="bg-gray-800 px-6 py-3 text-sm text-gray-400 border-t border-gray-700">
-                        {language==='fr'?'Affichage de':'Showing'} {previewData.data.length} {language==='fr'?'lignes sur':'rows of'} {previewData.totalRows}
+                      <div className="card p-4">
+                        <div className="text-gray-400 text-sm">Duplicats</div>
+                        <div className="text-2xl font-bold">{kpi.dupPct}%</div>
                       </div>
                     </div>
                   )}
 
-                  {/* Suggested corrections */}
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between">
-                      <h3 className="text-xl font-semibold flex items-center gap-2">
-                        <Sparkles className="w-6 h-6 text-purple-400" />
-                        <span>{language==='fr'?'Corrections suggérées par l’IA':'AI Suggested Corrections'}</span>
-                      </h3>
-                    </div>
+                  {renderTable()}
+                </div>
 
-                    {analysisData.columns.map((col) => col.corrections.length > 0 && (
-                      <div key={col.name} className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
-                        <div className="flex items-center justify-between mb-6">
-                          <div className="flex items-center gap-4">
-                            <div className={`w-3 h-3 rounded-full ${col.quality>=80?'bg-green-500':col.quality>=60?'bg-yellow-500':'bg-red-500'}`}></div>
-                            <div>
-                              <h4 className="text-lg font-semibold">{col.name}</h4>
-                              <p className="text-sm text-gray-400">{col.aiSuggestion}</p>
-                            </div>
-                          </div>
-                          <div className="text-right">
-                            <div className="text-xl font-bold">{col.quality}%</div>
-                            <div className="text-sm text-gray-400">{col.issues} issues</div>
-                          </div>
-                        </div>
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <button onClick={exportCSVSample} className="btn bg-green-600 hover:bg-green-700 text-white flex items-center justify-center gap-2">
+                    <Download className="w-5 h-5" />
+                    {TXT[lang].export.csv}
+                  </button>
+                  <button onClick={exportPDF} className="btn bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-2">
+                    <FileText className="w-5 h-5" />
+                    {TXT[lang].export.pdf}
+                  </button>
+                  <button onClick={() => { setPreview(null); setFile(null); setAutoFix(null); setDupePairs([]); }} className="btn-ghost flex items-center justify-center gap-2">
+                    <RefreshCw className="w-5 h-5" />
+                    Nouveau Fichier
+                  </button>
+                </div>
 
-                        <div className="space-y-4">
-                          {col.corrections.map((cor, i) => (
-                            <div key={i} className="bg-gray-950 rounded-xl p-4 border border-gray-700">
-                              <div className="flex items-center justify-between">
-                                <div className="flex-1 grid grid-cols-3 gap-4 items-center">
-                                  <div>
-                                    <span className="text-xs text-gray-500">Row {cor.row}</span>
-                                    <div className="font-mono text-sm text-red-400 bg-red-900/20 px-2 py-1 rounded mt-1">{cor.old}</div>
-                                  </div>
-                                  <div className="flex justify-center"><ArrowRight className="w-5 h-5 text-gray-500" /></div>
-                                  <div>
-                                    <span className="text-xs text-gray-500">{language==='fr'?'Correction':'Fix'}</span>
-                                    <div className="font-mono text-sm text-green-400 bg-green-900/20 px-2 py-1 rounded mt-1">{cor.new}</div>
-                                  </div>
-                                </div>
-                                <div className="ml-6 text-right text-xs text-gray-500">confidence: {cor.confidence}%</div>
-                              </div>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-
-                  {/* Insights */}
-                  <div className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
-                    <h3 className="text-lg font-semibold mb-4 flex items-center gap-2">
-                      <Eye className="w-5 h-5 text-blue-400" />
-                      <span>{language==='fr'?'Insights Business':'Business Insights'}</span>
+                {/* Insights + Diff */}
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div className="card p-6">
+                    <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                      <Sparkles className="w-5 h-5 text-purple-400" />
+                      {TXT[lang].insights}
                     </h3>
-                    <div className="space-y-4">
-                      {analysisData.insights.map((ins, i)=>(
-                        <div key={i} className="bg-gray-950 rounded-xl p-4 border border-gray-700">
-                          <h4 className="font-semibold mb-1">{ins.title}</h4>
-                          <p className="text-gray-400 text-sm">{ins.message}</p>
+                    <div className="space-y-2">
+                      {aiThinking && (
+                        <div className="text-sm text-gray-400 flex items-center gap-2">
+                          <MessageCircle className="w-4 h-4" />
+                          {TXT[lang].aiThinking}
                         </div>
+                      )}
+                      {insights.map((line, i) => (
+                        <div key={i} className="bg-gray-950 border border-gray-700 rounded-xl p-3 text-sm">{line}</div>
                       ))}
                     </div>
                   </div>
 
-                  {/* Actions */}
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <button onClick={downloadCSVFromCleanedPreview} className="flex items-center justify-center gap-2 px-6 py-3 bg-green-600 hover:bg-green-700 rounded-xl">
-                      <Download className="w-5 h-5" /><span>{language==='fr'?'CSV Nettoyé':'Cleaned CSV'}</span>
-                    </button>
-                    <button onClick={()=>setShowUpgradeModal(true)} className="flex items-center justify-center gap-2 px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-xl">
-                      <FileText className="w-5 h-5" /><span>PDF (Pro)</span>
-                    </button>
-                    <button onClick={()=>{
-                      setFile(null); setPreviewData(null); setAnalysisData(null); setAutoFixResult(null); setAiMessages([]);
-                    }} className="flex items-center justify-center gap-2 px-6 py-3 bg-gray-600 hover:bg-gray-700 rounded-xl">
-                      <RefreshCw className="w-5 h-5" /><span>{language==='fr'?'Nouveau Fichier':'New File'}</span>
-                    </button>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Chat side panel */}
-            <div className="xl:col-span-1">
-              <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6 sticky top-8">
-                <div className="flex items-center justify-between mb-6">
-                  <div className="flex items-center gap-3">
-                    <div className="w-10 h-10 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl grid place-items-center">
-                      <Bot className="w-5 h-5" />
+                  <div className="card p-6">
+                    <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
+                      <Eye className="w-5 h-5 text-blue-400" />
+                      {TXT[lang].diff}
+                    </h3>
+                    {!autoFix?.diff_sample?.length && (
+                      <div className="text-gray-400 text-sm">Aucun diff (lancez l'auto-fix ou activez le Mode Auto).</div>
+                    )}
+                    <div className="space-y-3 max-h-80 overflow-y-auto pr-2">
+                      {autoFix?.diff_sample?.map((d, idx) => (
+                        <div key={idx} className="bg-gray-950 rounded-xl p-3 border border-gray-700">
+                          <div className="text-xs text-gray-500 mb-1">Ligne {d.row} • Colonne {d.column} • {d.reason}</div>
+                          <div className="grid grid-cols-3 gap-3 items-center">
+                            <div className="font-mono text-xs text-red-300 bg-red-900/20 px-2 py-1 rounded">{String(d.old)}</div>
+                            <ArrowRight className="w-4 h-4 text-gray-500 mx-auto" />
+                            <div className="font-mono text-xs text-green-300 bg-green-900/20 px-2 py-1 rounded">{String(d.new)}</div>
+                          </div>
+                        </div>
+                      ))}
                     </div>
-                    <div>
-                      <h3 className="font-semibold">Assistant IA</h3>
-                      <p className="text-xs text-gray-400">Realtime</p>
-                    </div>
-                  </div>
-                  <button onClick={()=>setAiChatOpen(!aiChatOpen)} className="p-2 text-gray-400 hover:text-white hover:bg-gray-700 rounded-lg">
-                    <MessageCircle className="w-4 h-4" />
-                  </button>
-                </div>
-
-                <div className="space-y-3 max-h-96 overflow-y-auto mb-4">
-                  {aiMessages.length===0 ? (
-                    <div className="text-center py-8">
-                      <Brain className="w-8 h-8 text-gray-500 mx-auto mb-3" />
-                      <p className="text-sm text-gray-500">{language==='fr'?'L’IA parlera ici.':'AI will talk here.'}</p>
-                    </div>
-                  ) : aiMessages.map((m,i)=>(
-                    <div key={i} className={`p-3 rounded-xl text-sm ${m.role==="user" ? "bg-blue-600 text-white ml-4" : "bg-gray-800 text-gray-200 mr-4 border border-gray-700"}`}>
-                      <p className="text-xs leading-relaxed">{m.message}</p>
-                    </div>
-                  ))}
-                  {aiThinking && (
-                    <div className="bg-gray-800 border border-gray-700 p-3 rounded-xl mr-4">
-                      <div className="flex items-center gap-2">
-                        <Brain className="w-3 h-3 text-purple-400 animate-pulse" />
-                        <span className="text-xs text-gray-300">{language==='fr'?'L’IA réfléchit…':'Thinking…'}</span>
+                    {autoFix?.removed_exact_duplicates ? (
+                      <div className="text-xs text-gray-400 mt-3">
+                        Doublons exacts supprimés: {autoFix.removed_exact_duplicates}
                       </div>
-                    </div>
-                  )}
-                </div>
-
-                {aiChatOpen && (
-                  <div className="flex gap-2">
-                    <input value={aiInput} onChange={(e)=>setAiInput(e.target.value)}
-                      onKeyDown={(e)=>{ if (e.key==="Enter" && aiInput.trim()) {
-                        setAiMessages(prev=>[...prev,{role:"user", message: aiInput, timestamp: Date.now()}]); setAiInput("");
-                        setAiThinking(true);
-                        setTimeout(()=>{ setAiMessages(prev=>[...prev,{role:"assistant", message: language==='fr'?'Je recommande de corriger les colonnes à faible qualité.':'Start with low-quality columns.', timestamp: Date.now()}]); setAiThinking(false); }, 800);
-                      }}}
-                      placeholder={language==='fr'?'Posez une question…':'Ask something…'}
-                      className="flex-1 px-3 py-2 text-sm bg-gray-800 border border-gray-600 rounded-lg text-white placeholder-gray-400 focus:border-purple-500 focus:outline-none"/>
-                    <button onClick={()=>{
-                      if (!aiInput.trim()) return;
-                      setAiMessages(prev=>[...prev,{role:"user", message: aiInput, timestamp: Date.now()}]); setAiInput("");
-                      setAiThinking(true);
-                      setTimeout(()=>{ setAiMessages(prev=>[...prev,{role:"assistant", message: language==='fr'?'Je recommande de corriger les colonnes à faible qualité.':'Start with low-quality columns.', timestamp: Date.now()}]); setAiThinking(false); }, 800);
-                    }} className="px-3 py-2 bg-purple-600 hover:bg-purple-700 disabled:opacity-50 rounded-lg">
-                      <Zap className="w-4 h-4" />
-                    </button>
+                    ) : null}
                   </div>
-                )}
+                </div>
+              </>
+            )}
+
+            {isAnalyzing && (
+              <div className="text-center py-20">
+                <div className="w-20 h-20 bg-gradient-to-r from-blue-600 to-purple-600 rounded-2xl flex items-center justify-center mx-auto mb-8 animate-pulse">
+                  <BarChart3 className="w-10 h-10 text-white" />
+                </div>
+                <h3 className="text-2xl font-semibold text-white mb-4">Analyse en cours…</h3>
+                <p className="text-blue-400 mb-8 text-lg">{analysisStep}</p>
+                <div className="max-w-md mx-auto bg-gray-800 rounded-full h-3">
+                  <div className="bg-gradient-to-r from-blue-600 to-purple-600 h-3 rounded-full animate-pulse" style={{ width: "70%" }} />
+                </div>
               </div>
+            )}
+          </div>
 
-              {/* Auto diff panel */}
-              {autoFixResult && (
-                <div className="mt-6 bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
-                  <h3 className="text-lg font-semibold mb-4">{language==='fr'?'Diff (Mode Auto)':'Diff (Auto Mode)'}</h3>
-                  <p className="text-gray-400 mb-3">
-                    {language==='fr'?'Doublons exacts supprimés':'Exact duplicates removed'}: {autoFixResult.removed_exact_duplicates}
-                  </p>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-gray-900">
-                        <tr>
-                          <th className="px-3 py-2 text-left">Row</th>
-                          <th className="px-3 py-2 text-left">Column</th>
-                          <th className="px-3 py-2 text-left">Old</th>
-                          <th className="px-3 py-2 text-left">New</th>
-                          <th className="px-3 py-2 text-left">Reason</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-gray-800">
-                        {(autoFixResult.diff_sample || []).slice(0, 50).map((d:any, i:number)=>(
-                          <tr key={i}>
-                            <td className="px-3 py-2">{d.row}</td>
-                            <td className="px-3 py-2">{d.column}</td>
-                            <td className="px-3 py-2 text-red-300">{d.old}</td>
-                            <td className="px-3 py-2 text-green-300">{d.new}</td>
-                            <td className="px-3 py-2">{d.reason}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+          {/* Panneau latéral mini-chat/statut */}
+          <div className="xl:col-span-1">
+            <div className="card p-6 sticky top-8">
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <div className="w-10 h-10 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl flex items-center justify-center">
+                    <Sparkles className="w-5 h-5 text-white" />
+                  </div>
+                  <div>
+                    <h3 className="font-semibold text-white">Assistant IA</h3>
+                    <p className="text-xs text-gray-400">Conseils instantanés</p>
                   </div>
                 </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {activeTab==="schedule" && (
-          <div className="max-w-4xl mx-auto space-y-8">
-            <div className="text-center">
-              <Calendar className="mx-auto h-16 w-16 text-gray-400 mb-4"/>
-              <h3 className="text-2xl font-semibold mb-2">{language==='fr'?'Planification IA':'AI Scheduling'}</h3>
-              <p className="text-gray-400">{language==='fr'?'Générez un fichier .ICS à importer dans votre agenda.':'Generate an .ICS file for your calendar.'}</p>
-            </div>
-
-            <div className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl p-8 border border-gray-700">
-              <h4 className="text-xl font-semibold mb-6">{language==='fr'?'Créer une tâche':'Create a task'}</h4>
-              <div className="flex gap-3">
-                <input id="ics-rule" defaultValue="DAILY 09:00" className="flex-1 px-4 py-3 bg-gray-800 border border-gray-600 rounded-xl"/>
-                <button onClick={()=>generateICS((document.getElementById('ics-rule') as HTMLInputElement).value)} className="px-6 py-3 bg-blue-600 hover:bg-blue-700 rounded-xl">
-                  {language==='fr'?'Générer .ICS':'Generate .ICS'}
+              </div>
+              <div className="space-y-2 text-sm">
+                <div className="text-gray-300">
+                  {file ? <>Fichier: <span className="text-gray-400">{file.name}</span></> : "Aucun fichier"}
+                </div>
+                <div className="text-gray-300">
+                  Backend: <span className="text-gray-400">{(import.meta as any).env.VITE_API_BASE_URL || "HF Space"}</span>
+                </div>
+                <button className="btn-ghost mt-4 w-full" onClick={() => setActive("rules")}>
+                  Configurer des règles
                 </button>
               </div>
-              {icsContent && (<pre className="mt-6 bg-gray-900 p-4 rounded-xl text-xs overflow-x-auto">{icsContent}</pre>)}
-            </div>
-          </div>
-        )}
-
-        {activeTab==="jobs" && (
-          <div className="max-w-6xl mx-auto space-y-8">
-            <div className="flex items-center justify-between">
-              <h2 className="text-2xl font-bold">Jobs</h2>
-              <div className="flex gap-3">
-                <button onClick={loadJobs} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded-xl flex items-center gap-2">
-                  <RefreshCw className="w-4 h-4" /><span>{language==='fr'?'Actualiser':'Refresh'}</span>
-                </button>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
-              {[{ label: language==='fr'?'En cours':'Running', count: running, icon: Clock },
-                { label: language==='fr'?'Terminés':'Completed', count: completed, icon: CheckCircle },
-                { label: language==='fr'?'En attente':'Pending', count: pending, icon: Target },
-                { label: language==='fr'?'Échecs':'Failed', count: failed, icon: XCircle }].map((stat, idx)=>(
-                  <div key={idx} className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
-                    <div className="flex items-center justify-between mb-4">
-                      <stat.icon className="w-8 h-8 text-blue-400" />
-                      <span className="text-2xl font-bold">{stat.count}</span>
-                    </div>
-                    <div className="text-gray-400">{stat.label}</div>
-                  </div>
-              ))}
-            </div>
-
-            <div className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl border border-gray-700 overflow-hidden">
-              <div className="px-8 py-6 border-b border-gray-700">
-                <h3 className="text-lg font-semibold">{language==='fr'?'Historique des Jobs':'Job History'}</h3>
-              </div>
-              <div className="p-8 text-center">
-                <Settings className="w-16 h-16 text-gray-600 mx-auto mb-4" />
-                <h4 className="text-lg font-medium text-gray-400 mb-2">{language==='fr'?'Mode Démonstration':'Demo Mode'}</h4>
-                <p className="text-gray-500 mb-6">
-                  {language==='fr'?'Les jobs réels seront disponibles après configuration Pro.':'Real jobs will be available in Pro mode.'}
-                </p>
-              </div>
-            </div>
-          </div>
-        )}
-      </main>
-
-      {/* Upgrade modal */}
-      {showUpgradeModal && (
-        <div className="fixed inset-0 bg-black/70 grid place-items-center z-50" onClick={()=>setShowUpgradeModal(false)}>
-          <div className="bg-gradient-to-br from-gray-900 to-gray-800 border border-gray-700 rounded-2xl p-8 max-w-md w-full mx-4" onClick={(e)=>e.stopPropagation()}>
-            <div className="text-center">
-              <div className="w-16 h-16 bg-gradient-to-r from-yellow-600 to-orange-600 rounded-2xl grid place-items-center mx-auto mb-6">
-                <Crown className="w-8 h-8 text-white" />
-              </div>
-              <h3 className="text-2xl font-bold mb-2">{language==='fr'?'Passez au Pro':'Upgrade to Pro'}</h3>
-              <p className="text-gray-400 mb-8">{language==='fr'?'Débloquez toutes les fonctionnalités avancées':'Unlock advanced features'}</p>
-            </div>
-            <div className="space-y-4 mb-8">
-              {[
-                language==='fr'?'Fichiers jusqu\'à 100k lignes':'Files up to 100k rows',
-                language==='fr'?'Scheduling 24/7':'24/7 Scheduling',
-                language==='fr'?'Connexions bases de données':'Database connectors',
-                language==='fr'?'Stockage cloud sécurisé':'Secure cloud storage',
-                'Priority support'
-              ].map((feature, idx)=>(
-                <div key={idx} className="flex items-center gap-3">
-                  <CheckCircle className="w-5 h-5 text-green-500" />
-                  <span className="text-gray-300">{feature}</span>
-                </div>
-              ))}
-            </div>
-            <div className="flex gap-4">
-              <button onClick={()=>setShowUpgradeModal(false)} className="flex-1 px-4 py-3 bg-gray-700 hover:bg-gray-600 rounded-xl">Fermer</button>
-              <button className="flex-1 px-4 py-3 bg-gradient-to-r from-blue-600 to-purple-600 hover:from-blue-700 hover:to-purple-700 rounded-xl">Demo</button>
             </div>
           </div>
         </div>
       )}
-    </div>
-  );
-};
 
-export default DataCleaningAgent;
+      {/* DEDUPE */}
+      {active === "dedupe" && (
+        <div className="space-y-6">
+          <div className="card p-6">
+            <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
+              <Target className="w-5 h-5 text-yellow-400" /> {TXT[lang].dedupe.title}
+            </h3>
+            <div className="grid md:grid-cols-3 gap-4">
+              <div>
+                <div className="text-sm text-gray-300 mb-2">{TXT[lang].dedupe.keys}</div>
+                <div className="flex flex-wrap gap-2">
+                  {headers.map((h) => {
+                    const active = dupeKeys.includes(h);
+                    return (
+                      <button
+                        key={h}
+                        onClick={() => setDupeKeys(active ? dupeKeys.filter(k => k !== h) : [...dupeKeys, h])}
+                        className={`badge ${active ? "border-blue-500 text-blue-300" : "border-gray-600 text-gray-400"}`}
+                      >
+                        {h}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+              <div>
+                <div className="text-sm text-gray-300 mb-2">{TXT[lang].dedupe.threshold}: {dupeThreshold}</div>
+                <input type="range" min={70} max={100} value={dupeThreshold} onChange={e => setDupeThreshold(Number(e.target.value))} className="w-full" />
+              </div>
+              <div className="flex items-end">
+                <button onClick={runFuzzy} className="btn-primary w-full flex items-center justify-center gap-2">
+                  <Play className="w-4 h-4" /> {TXT[lang].dedupe.run}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="card p-6">
+            <h4 className="font-semibold mb-3">{TXT[lang].dedupe.pairs}</h4>
+            {!dupePairs.length && <div className="text-gray-400 text-sm">Aucune paire (ajuste les clés et le seuil).</div>}
+            <div className="space-y-3">
+              {dupePairs.map((p, idx) => (
+                <div key={idx} className="bg-gray-950 border border-gray-700 rounded-xl p-3">
+                  <div className="text-xs text-gray-400 mb-2">Score: {p.score}</div>
+                  <div className="grid md:grid-cols-2 gap-3">
+                    <pre className="text-xs bg-gray-900 p-2 rounded-lg overflow-auto">{JSON.stringify(previewRecords[p.i], null, 2)}</pre>
+                    <pre className="text-xs bg-gray-900 p-2 rounded-lg overflow-auto">{JSON.stringify(previewRecords[p.j], null, 2)}</pre>
+                  </div>
+                  <div className="mt-2 text-right">
+                    <button className="btn-ghost">Fusionner (mock)</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* RULES */}
+      {active === "rules" && (
+        <div className="space-y-6">
+          <div className="card p-6">
+            <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
+              <ListChecks className="w-5 h-5 text-green-400" /> {TXT[lang].rules.title}
+            </h3>
+            <div className="flex flex-wrap gap-2 mb-4">
+              {headers.map((h) => (
+                <span key={h} className="badge border-gray-600 text-gray-400">{h}</span>
+              ))}
+            </div>
+            <div className="flex gap-3">
+              <button onClick={addRule} className="btn-primary">+ Règle</button>
+              <div className="relative">
+                <details className="bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 cursor-pointer">
+                  <summary className="text-sm">{TXT[lang].rules.presets}</summary>
+                  <div className="mt-2 space-y-2">
+                    {PRESETS.map((p) => (
+                      <button key={p.name} onClick={() => applyPreset(p)} className="btn-ghost w-full text-left">
+                        {p.name}
+                      </button>
+                    ))}
+                  </div>
+                </details>
+              </div>
+              <button
+                onClick={() => { localStorage.setItem("dca_rules", JSON.stringify(rules)); alert("Règles sauvegardées."); }}
+                className="btn-ghost"
+              >
+                {TXT[lang].rules.save}
+              </button>
+            </div>
+            <div className="mt-4">
+              <pre className="text-xs bg-gray-900 p-3 rounded-xl overflow-auto">{JSON.stringify(rules, null, 2)}</pre>
+            </div>
+          </div>
+          <div className="text-sm text-gray-400">
+            Les règles s’appliquent visuellement à la preview (rouge = invalide). Pour l’application totale (serveur/CSV complet), activera un job “Pro”.
+          </div>
+        </div>
+      )}
+
+      {/* SCHEDULE */}
+      {active === "schedule" && (
+        <div className="max-w-3xl space-y-6">
+          <div className="text-center">
+            <Calendar className="mx-auto h-16 w-16 text-gray-400 mb-4" />
+            <h3 className="text-2xl font-semibold">Planification IA</h3>
+            <p className="text-gray-400">Générez un .ICS (ex: DAILY 09:00)</p>
+          </div>
+          <div className="card p-6">
+            <div className="flex gap-3">
+              <input id="icsRule" type="text" defaultValue="DAILY 09:00" className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-white" />
+              <button
+                className="btn-primary"
+                onClick={async () => {
+                  const val = (document.getElementById("icsRule") as HTMLInputElement).value || "DAILY 09:00";
+                  try {
+                    const { ics } = await api.ics(val);
+                    downloadText("dataclean_schedule.ics", ics, "text/calendar");
+                  } catch (e: any) {
+                    alert("Erreur ICS: " + e?.message);
+                  }
+                }}
+              >
+                {TXT[lang].export.ics}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* JOBS */}
+      {active === "jobs" && (
+        <div className="space-y-6">
+          <div className="flex items-center justify-between">
+            <h2 className="text-2xl font-bold">{TXT[lang].jobs.title}</h2>
+            <div className="flex gap-3">
+              <button className="btn bg-green-600 hover:bg-green-700 text-white flex items-center gap-2">
+                <Play className="w-4 h-4" /> Lancer Test
+              </button>
+              <button onClick={async () => {
+                try {
+                  const res = await api.jobs();
+                  alert("Jobs: " + JSON.stringify(res.jobs));
+                } catch (e: any) {
+                  alert("Erreur jobs: " + e?.message);
+                }
+              }} className="btn-ghost flex items-center gap-2">
+                <RefreshCw className="w-4 h-4" /> Actualiser
+              </button>
+            </div>
+          </div>
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-6">
+            {[
+              { label: "En cours", count: 2, icon: Clock },
+              { label: "Terminés", count: 47, icon: CheckCircle },
+              { label: "En attente", count: 5, icon: Target },
+              { label: "Échecs", count: 1, icon: XCircle }
+            ].map((stat, idx) => (
+              <div key={idx} className="card p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <stat.icon className="w-8 h-8 text-blue-400" />
+                  <span className="text-2xl font-bold text-white">{stat.count}</span>
+                </div>
+                <div className="text-gray-400">{stat.label}</div>
+              </div>
+            ))}
+          </div>
+          <div className="card overflow-hidden">
+            <div className="px-8 py-6 border-b border-gray-700">
+              <h3 className="text-lg font-semibold">Historique des Jobs</h3>
+            </div>
+            <div className="p-8 text-center">
+              <Settings className="w-16 h-16 text-gray-600 mx-auto mb-4" />
+              <h4 className="text-lg font-medium text-gray-400 mb-2">Mode Démonstration</h4>
+              <p className="text-gray-500 mb-6">Les jobs réels seront disponibles après mise en place du scheduler serveur (Pro).</p>
+            </div>
+          </div>
+        </div>
+      )}
+    </>
+  );
+}
