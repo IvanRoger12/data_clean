@@ -1,8 +1,8 @@
 import React, { useCallback, useMemo, useRef, useState } from "react";
 import {
   Upload, FileText, BarChart3, Calendar, Settings, Download, Play,
-  Clock, CheckCircle, XCircle, Crown, Globe, RefreshCw, Eye, TrendingUp,
-  Sparkles, MessageCircle, Zap, Target, ArrowRight, ShieldCheck, Wand2, ListChecks
+  Clock, CheckCircle, XCircle, RefreshCw, Eye, TrendingUp,
+  Sparkles, MessageCircle, Target, ArrowRight, ShieldCheck, Wand2, ListChecks
 } from "lucide-react";
 import { api } from "../utils/api";
 import { arrayToCSV, downloadText } from "../utils/csv";
@@ -19,12 +19,12 @@ const TXT = {
     max: "Taille max: 50 Mo",
     free: "Analyse gratuite - 1000 lignes",
     privacy: "Traitement local sécurisé",
-    start: "Commencer l'analyse IA",
+    start: "Relancer l'analyse IA",
     insights: "Insights IA",
     aiThinking: "L'IA réfléchit...",
     autoMode: "Mode Auto (fixes sûrs)",
     diff: "Diff & validations",
-    export: { csv: "CSV (échantillon)", pdf: "Rapport PDF", ics: "Télécharger .ICS" },
+    export: { csv: "CSV (échantillon)", csvFull: "CSV Nettoyé (complet)", pdf: "Rapport PDF", ics: "Télécharger .ICS" },
     dedupe: { title: "Fuzzy Dedupe", keys: "Clés composites", threshold: "Seuil de similarité", run: "Détecter", pairs: "Paires détectées" },
     rules: { title: "Rule Builder", required: "Obligatoire", regex: "Regex", presets: "Presets", save: "Sauvegarder règles" },
     schedule: { title: "Planification", rule: "Règle ICS (ex: DAILY 09:00)", gen: "Générer .ICS" },
@@ -37,12 +37,12 @@ const TXT = {
     max: "Max size: 50 MB",
     free: "Free analysis - 1000 rows",
     privacy: "Secure local processing",
-    start: "Start AI Analysis",
+    start: "Re-run AI Analysis",
     insights: "AI Insights",
     aiThinking: "AI is thinking...",
     autoMode: "Auto Mode (safe fixes)",
     diff: "Diff & validations",
-    export: { csv: "CSV (sample)", pdf: "PDF Report", ics: "Download .ICS" },
+    export: { csv: "CSV (sample)", csvFull: "Cleaned CSV (full)", pdf: "PDF Report", ics: "Download .ICS" },
     dedupe: { title: "Fuzzy Dedupe", keys: "Composite keys", threshold: "Similarity threshold", run: "Detect", pairs: "Pairs detected" },
     rules: { title: "Rule Builder", required: "Required", regex: "Regex", presets: "Presets", save: "Save rules" },
     schedule: { title: "Schedule", rule: "ICS Rule (e.g., DAILY 09:00)", gen: "Generate .ICS" },
@@ -118,18 +118,16 @@ export default function DataCleaningAgent({ lang }: Props) {
       setAnalysisStep("Analyse IA...");
       setAnalyzing(true);
 
-      // Insights (LLM)
       setAiThinking(true);
       try {
         const ii = await api.insights(res.profile, res.kpi);
         setInsights(ii.insights || []);
-      } catch (err) {
+      } catch {
         setInsights(["LLM indisponible. Affichage des heuristiques."]);
       } finally {
         setAiThinking(false);
       }
 
-      // Auto-fix si activé
       if (autoMode) {
         setAnalysisStep("Auto-fix (trim, ISO date, E.164, dedup exact)...");
         try {
@@ -164,11 +162,9 @@ export default function DataCleaningAgent({ lang }: Props) {
                   <th key={h} className="px-4 py-3 text-left text-sm font-medium text-gray-300 border-r border-gray-700 last:border-r-0">
                     <div className="flex items-center gap-2">
                       <span>{h}</span>
-                      {detected[h] && (
-                        <span className="badge border-blue-500 text-blue-300">{detected[h]}</span>
-                      )}
+                      {detected[h] && (<span className="inline-flex items-center px-2 py-0.5 text-xs rounded-full border border-blue-500 text-blue-300"> {detected[h]} </span>)}
                       {rules.find(r => r.column === h && (r.required || r.regex)) && (
-                        <span className="badge border-purple-500 text-purple-300">rule</span>
+                        <span className="inline-flex items-center px-2 py-0.5 text-xs rounded-full border border-purple-500 text-purple-300">rule</span>
                       )}
                     </div>
                   </th>
@@ -185,7 +181,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                     if (rule?.required && (cell === "" || cell === null || cell === undefined)) invalid = true;
                     if (rule?.regex) {
                       try { if (!new RegExp(rule.regex).test(String(cell ?? ""))) invalid = true; }
-                      catch { /* ignore bad regex */ }
+                      catch { /* ignore */ }
                     }
                     return (
                       <td key={j} className={`px-4 py-3 text-sm border-r border-gray-800 last:border-r-0 font-mono ${invalid ? "text-red-300 bg-red-900/10" : "text-gray-300"}`}>
@@ -226,6 +222,20 @@ export default function DataCleaningAgent({ lang }: Props) {
     downloadText("cleaned_sample.csv", csv, "text/csv");
   }
 
+  async function exportCSVFull() {
+    if (!file) { alert("Uploade un fichier d'abord."); return; }
+    try {
+      const { blob, filename } = await api.autoFixCSV(file);
+      const name = filename || (preview?.fileName ? `${(preview!.fileName as string).replace(/\.[^.]+$/, "")}.cleaned.csv` : `cleaned_${Date.now()}.csv`);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url; a.download = name; a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert("Erreur Download: " + e?.message);
+    }
+  }
+
   function addRule() {
     const column = prompt("Nom de la colonne ?");
     if (!column) return;
@@ -250,7 +260,7 @@ export default function DataCleaningAgent({ lang }: Props) {
   async function runFuzzy() {
     if (!dupeKeys.length) { alert("Choisis au moins une clé."); return; }
     try {
-      const rows = previewRecords.slice(0, 300); // échantillon pour vitesse
+      const rows = previewRecords.slice(0, 300);
       const res = await api.fuzzy(rows, dupeKeys, dupeThreshold);
       setDupePairs(res.pairs);
     } catch (e: any) {
@@ -330,7 +340,7 @@ export default function DataCleaningAgent({ lang }: Props) {
 
             {preview && (
               <>
-                <div className="card p-6">
+                <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
                   <div className="flex items-center justify-between mb-6">
                     <div className="flex items-center gap-4">
                       <div className="w-12 h-12 bg-gradient-to-br from-green-600/20 to-blue-600/20 rounded-xl flex items-center justify-center">
@@ -347,7 +357,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                         <span>{TXT[lang].autoMode}</span>
                         <input type="checkbox" className="accent-blue-500" checked={autoMode} onChange={e => setAutoMode(e.target.checked)} />
                       </label>
-                      <button onClick={() => handleUpload(file!)} className="btn-primary flex items-center gap-2">
+                      <button onClick={() => handleUpload(file!)} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors flex items-center gap-2">
                         <Wand2 className="w-4 h-4" />
                         {TXT[lang].start}
                       </button>
@@ -356,20 +366,20 @@ export default function DataCleaningAgent({ lang }: Props) {
 
                   {kpi && (
                     <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-                      <div className="card p-4">
+                      <div className="bg-gray-900 border border-gray-700 rounded-2xl p-4">
                         <div className="text-gray-400 text-sm">Score</div>
                         <div className="text-2xl font-bold">{kpi.qualityScore}%</div>
                         <div className="text-green-400 text-xs flex items-center gap-1"><TrendingUp className="w-3 h-3" /> +possible</div>
                       </div>
-                      <div className="card p-4">
+                      <div className="bg-gray-900 border border-gray-700 rounded-2xl p-4">
                         <div className="text-gray-400 text-sm">Lignes</div>
                         <div className="text-2xl font-bold">{kpi.rows}</div>
                       </div>
-                      <div className="card p-4">
+                      <div className="bg-gray-900 border border-gray-700 rounded-2xl p-4">
                         <div className="text-gray-400 text-sm">Colonnes</div>
                         <div className="text-2xl font-bold">{kpi.cols}</div>
                       </div>
-                      <div className="card p-4">
+                      <div className="bg-gray-900 border border-gray-700 rounded-2xl p-4">
                         <div className="text-gray-400 text-sm">Duplicats</div>
                         <div className="text-2xl font-bold">{kpi.dupPct}%</div>
                       </div>
@@ -379,24 +389,38 @@ export default function DataCleaningAgent({ lang }: Props) {
                   {renderTable()}
                 </div>
 
-                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                  <button onClick={exportCSVSample} className="btn bg-green-600 hover:bg-green-700 text-white flex items-center justify-center gap-2">
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  <button onClick={exportCSVSample} className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2">
                     <Download className="w-5 h-5" />
                     {TXT[lang].export.csv}
                   </button>
-                  <button onClick={exportPDF} className="btn bg-blue-600 hover:bg-blue-700 text-white flex items-center justify-center gap-2">
+                  <button onClick={exportCSVFull} className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2">
+                    <Download className="w-5 h-5" />
+                    {TXT[lang].export.csvFull}
+                  </button>
+                  <button onClick={() => {
+                    if (!kpi) return;
+                    const doc = buildPdfReport({
+                      fileName: preview?.fileName,
+                      kpi,
+                      insights,
+                      diffSample: autoFix?.diff_sample,
+                      cleanedPreview: autoFix?.cleaned_preview
+                    });
+                    doc.save(`DataClean_Report_${Date.now()}.pdf`);
+                  }} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2">
                     <FileText className="w-5 h-5" />
                     {TXT[lang].export.pdf}
                   </button>
-                  <button onClick={() => { setPreview(null); setFile(null); setAutoFix(null); setDupePairs([]); }} className="btn-ghost flex items-center justify-center gap-2">
+                  <button onClick={() => { setPreview(null); setFile(null); setAutoFix(null); setDupePairs([]); }} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-xl font-medium transition-colors flex items-center justify-center gap-2">
                     <RefreshCw className="w-5 h-5" />
                     Nouveau Fichier
                   </button>
                 </div>
 
                 {/* Insights + Diff */}
-                <div className="grid md:grid-cols-2 gap-6">
-                  <div className="card p-6">
+                <div className="grid md:grid-cols-2 gap-6 mt-6">
+                  <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
                     <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
                       <Sparkles className="w-5 h-5 text-purple-400" />
                       {TXT[lang].insights}
@@ -414,7 +438,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                     </div>
                   </div>
 
-                  <div className="card p-6">
+                  <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl p-6 border border-gray-700">
                     <h3 className="text-lg font-semibold text-white mb-4 flex items-center gap-2">
                       <Eye className="w-5 h-5 text-blue-400" />
                       {TXT[lang].diff}
@@ -458,9 +482,9 @@ export default function DataCleaningAgent({ lang }: Props) {
             )}
           </div>
 
-          {/* Panneau latéral mini-chat/statut */}
+          {/* Side panel */}
           <div className="xl:col-span-1">
-            <div className="card p-6 sticky top-8">
+            <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6 sticky top-8">
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center gap-3">
                   <div className="w-10 h-10 bg-gradient-to-r from-purple-600 to-blue-600 rounded-xl flex items-center justify-center">
@@ -479,7 +503,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                 <div className="text-gray-300">
                   Backend: <span className="text-gray-400">{(import.meta as any).env.VITE_API_BASE_URL || "HF Space"}</span>
                 </div>
-                <button className="btn-ghost mt-4 w-full" onClick={() => setActive("rules")}>
+                <button className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-xl font-medium transition-colors w-full mt-4" onClick={() => setActive("rules")}>
                   Configurer des règles
                 </button>
               </div>
@@ -491,7 +515,7 @@ export default function DataCleaningAgent({ lang }: Props) {
       {/* DEDUPE */}
       {active === "dedupe" && (
         <div className="space-y-6">
-          <div className="card p-6">
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6">
             <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
               <Target className="w-5 h-5 text-yellow-400" /> {TXT[lang].dedupe.title}
             </h3>
@@ -500,12 +524,12 @@ export default function DataCleaningAgent({ lang }: Props) {
                 <div className="text-sm text-gray-300 mb-2">{TXT[lang].dedupe.keys}</div>
                 <div className="flex flex-wrap gap-2">
                   {headers.map((h) => {
-                    const active = dupeKeys.includes(h);
+                    const activeK = dupeKeys.includes(h);
                     return (
                       <button
                         key={h}
-                        onClick={() => setDupeKeys(active ? dupeKeys.filter(k => k !== h) : [...dupeKeys, h])}
-                        className={`badge ${active ? "border-blue-500 text-blue-300" : "border-gray-600 text-gray-400"}`}
+                        onClick={() => setDupeKeys(activeK ? dupeKeys.filter(k => k !== h) : [...dupeKeys, h])}
+                        className={`inline-flex items-center px-2 py-0.5 text-xs rounded-full border ${activeK ? "border-blue-500 text-blue-300" : "border-gray-600 text-gray-400"}`}
                       >
                         {h}
                       </button>
@@ -518,14 +542,14 @@ export default function DataCleaningAgent({ lang }: Props) {
                 <input type="range" min={70} max={100} value={dupeThreshold} onChange={e => setDupeThreshold(Number(e.target.value))} className="w-full" />
               </div>
               <div className="flex items-end">
-                <button onClick={runFuzzy} className="btn-primary w-full flex items-center justify-center gap-2">
+                <button onClick={runFuzzy} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-medium transition-colors w-full flex items-center justify-center gap-2">
                   <Play className="w-4 h-4" /> {TXT[lang].dedupe.run}
                 </button>
               </div>
             </div>
           </div>
 
-          <div className="card p-6">
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6">
             <h4 className="font-semibold mb-3">{TXT[lang].dedupe.pairs}</h4>
             {!dupePairs.length && <div className="text-gray-400 text-sm">Aucune paire (ajuste les clés et le seuil).</div>}
             <div className="space-y-3">
@@ -537,7 +561,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                     <pre className="text-xs bg-gray-900 p-2 rounded-lg overflow-auto">{JSON.stringify(previewRecords[p.j], null, 2)}</pre>
                   </div>
                   <div className="mt-2 text-right">
-                    <button className="btn-ghost">Fusionner (mock)</button>
+                    <button className="px-3 py-1 bg-gray-800 hover:bg-gray-700 rounded-lg text-sm">Fusionner (mock)</button>
                   </div>
                 </div>
               ))}
@@ -549,23 +573,23 @@ export default function DataCleaningAgent({ lang }: Props) {
       {/* RULES */}
       {active === "rules" && (
         <div className="space-y-6">
-          <div className="card p-6">
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6">
             <h3 className="text-xl font-semibold mb-4 flex items-center gap-2">
-              <ListChecks className="w-5 h-5 text-green-400" /> {TXT[lang].rules.title}
+              <ListChecks className="w-5 h-5 text-green-400" /> Builder de règles
             </h3>
             <div className="flex flex-wrap gap-2 mb-4">
               {headers.map((h) => (
-                <span key={h} className="badge border-gray-600 text-gray-400">{h}</span>
+                <span key={h} className="inline-flex items-center px-2 py-0.5 text-xs rounded-full border border-gray-600 text-gray-400">{h}</span>
               ))}
             </div>
             <div className="flex gap-3">
-              <button onClick={addRule} className="btn-primary">+ Règle</button>
+              <button onClick={addRule} className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl">+ Règle</button>
               <div className="relative">
                 <details className="bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 cursor-pointer">
-                  <summary className="text-sm">{TXT[lang].rules.presets}</summary>
+                  <summary className="text-sm">Presets</summary>
                   <div className="mt-2 space-y-2">
                     {PRESETS.map((p) => (
-                      <button key={p.name} onClick={() => applyPreset(p)} className="btn-ghost w-full text-left">
+                      <button key={p.name} onClick={() => applyPreset(p)} className="px-3 py-2 bg-gray-800 hover:bg-gray-700 rounded-lg w-full text-left">
                         {p.name}
                       </button>
                     ))}
@@ -574,9 +598,9 @@ export default function DataCleaningAgent({ lang }: Props) {
               </div>
               <button
                 onClick={() => { localStorage.setItem("dca_rules", JSON.stringify(rules)); alert("Règles sauvegardées."); }}
-                className="btn-ghost"
+                className="px-4 py-2 bg-gray-800 hover:bg-gray-700 text-white rounded-xl"
               >
-                {TXT[lang].rules.save}
+                Sauvegarder règles
               </button>
             </div>
             <div className="mt-4">
@@ -597,11 +621,11 @@ export default function DataCleaningAgent({ lang }: Props) {
             <h3 className="text-2xl font-semibold">Planification IA</h3>
             <p className="text-gray-400">Générez un .ICS (ex: DAILY 09:00)</p>
           </div>
-          <div className="card p-6">
+          <div className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6">
             <div className="flex gap-3">
               <input id="icsRule" type="text" defaultValue="DAILY 09:00" className="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-3 py-2 text-white" />
               <button
-                className="btn-primary"
+                className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl"
                 onClick={async () => {
                   const val = (document.getElementById("icsRule") as HTMLInputElement).value || "DAILY 09:00";
                   try {
@@ -612,7 +636,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                   }
                 }}
               >
-                {TXT[lang].export.ics}
+                Télécharger .ICS
               </button>
             </div>
           </div>
@@ -623,9 +647,9 @@ export default function DataCleaningAgent({ lang }: Props) {
       {active === "jobs" && (
         <div className="space-y-6">
           <div className="flex items-center justify-between">
-            <h2 className="text-2xl font-bold">{TXT[lang].jobs.title}</h2>
+            <h2 className="text-2xl font-bold">{t.jobs.title}</h2>
             <div className="flex gap-3">
-              <button className="btn bg-green-600 hover:bg-green-700 text-white flex items-center gap-2">
+              <button className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded-xl flex items-center gap-2">
                 <Play className="w-4 h-4" /> Lancer Test
               </button>
               <button onClick={async () => {
@@ -635,7 +659,7 @@ export default function DataCleaningAgent({ lang }: Props) {
                 } catch (e: any) {
                   alert("Erreur jobs: " + e?.message);
                 }
-              }} className="btn-ghost flex items-center gap-2">
+              }} className="px-4 py-2 bg-gray-700 hover:bg-gray-600 text-white rounded-xl flex items-center gap-2">
                 <RefreshCw className="w-4 h-4" /> Actualiser
               </button>
             </div>
@@ -647,7 +671,7 @@ export default function DataCleaningAgent({ lang }: Props) {
               { label: "En attente", count: 5, icon: Target },
               { label: "Échecs", count: 1, icon: XCircle }
             ].map((stat, idx) => (
-              <div key={idx} className="card p-6">
+              <div key={idx} className="bg-gradient-to-br from-gray-900 to-gray-800 rounded-2xl border border-gray-700 p-6">
                 <div className="flex items-center justify-between mb-4">
                   <stat.icon className="w-8 h-8 text-blue-400" />
                   <span className="text-2xl font-bold text-white">{stat.count}</span>
@@ -656,7 +680,7 @@ export default function DataCleaningAgent({ lang }: Props) {
               </div>
             ))}
           </div>
-          <div className="card overflow-hidden">
+          <div className="bg-gradient-to-r from-gray-900 to-gray-800 rounded-2xl border border-gray-700 overflow-hidden">
             <div className="px-8 py-6 border-b border-gray-700">
               <h3 className="text-lg font-semibold">Historique des Jobs</h3>
             </div>
