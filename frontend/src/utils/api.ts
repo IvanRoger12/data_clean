@@ -41,6 +41,45 @@ async function request<T>(
   }
 }
 
+// Binaire (CSV complet)
+async function requestBinary(
+  path: string,
+  opts: { form: FormData; timeoutMs?: number; retries?: number } 
+): Promise<{ blob: Blob; filename?: string }> {
+  const url = `${BASE}${path}`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), opts.timeoutMs ?? 300000);
+  const retries = Math.max(0, opts.retries ?? 1);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      body: opts.form,
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      if (retries > 0 && (res.status >= 500 || res.status === 429)) {
+        await sleep(1000 * (2 - retries));
+        return requestBinary(path, { ...opts, retries: retries - 1 });
+      }
+      throw new Error(`HTTP ${res.status} – ${txt || "Request failed"}`);
+    }
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = /filename="([^"]+)"/i.exec(cd || "");
+    const filename = m?.[1];
+    const blob = await res.blob();
+    return { blob, filename };
+  } catch (e: any) {
+    clearTimeout(timeout);
+    if (retries > 0) {
+      await sleep(1000 * (2 - retries));
+      return requestBinary(path, { ...opts, retries: retries - 1 });
+    }
+    throw new Error(e?.message || "Network error");
+  }
+}
+
 export const api = {
   health: () => request<{ ok: boolean }>("/api/health"),
   analyze: (file: File) => {
@@ -52,7 +91,14 @@ export const api = {
     const fd = new FormData();
     fd.append("file", file);
     if (region) fd.append("region", region);
-    return request<any>("/api/tools/auto_fix", { form: fd, timeoutMs: 30000 });
+    return request<any>("/api/tools/auto_fix", { form: fd, timeoutMs: 60000 });
+  },
+  // NOUVEAU — CSV complet nettoyé
+  autoFixCSV: async (file: File, region?: string) => {
+    const fd = new FormData();
+    fd.append("file", file);
+    if (region) fd.append("region", region);
+    return requestBinary("/api/tools/auto_fix_csv", { form: fd, timeoutMs: 300000 });
   },
   insights: (profile: any, kpi: any, prompt?: string) =>
     request<{ insights: string[] }>("/api/insights", {
