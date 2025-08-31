@@ -1,12 +1,24 @@
-import Papa from 'papaparse'
+import Papa from "papaparse";
 
-export function downloadCSV(filename: string, rows: Record<string, any>[]) {
-  const csv = Papa.unparse(rows)
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename.endsWith('.csv') ? filename : `${filename}.csv`
-  a.click()
-  URL.revokeObjectURL(url)
+export async function parseCSV(file: File): Promise<Record<string, string>[]> {
+  return new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: "greedy",
+      transformHeader: (h) => h.trim(),
+      complete: (r) => {
+        const rows = (r.data as any[]).map((row) => {
+          const obj: Record<string, string> = {};
+          Object.keys(row).forEach((k) => (obj[k] = (row[k] ?? "").toString()));
+          return obj;
+        });
+        resolve(rows);
+      },
+      error: (err) => reject(err)
+    });
+  });
+}
+
+export function toCSV(rows: Record<string, any>[]): string {
+  return Papa.unparse(rows, { quotes: (v:any)=> typeof v === "string" && /[",\n;]/.test(v) });
 }
