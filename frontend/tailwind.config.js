@@ -1,16 +1,16 @@
-import type { Config } from "tailwindcss";
-
+/** @type {import('tailwindcss').Config} */
 export default {
-  content: ["./index.html", "./src/**/*.{ts,tsx,js,jsx}"],
+  content: ["./index.html","./src/**/*.{ts,tsx,js,jsx}"],
   theme: {
     extend: {
       colors: {
-        ink: { 900: "#0a0b0f", 800: "#0f1117" }
-      },
-      boxShadow: {
-        neon: "0 0 0 1px rgba(59,130,246,0.2), 0 0 20px rgba(168,85,247,0.2)"
+        brand: {
+          1: "#60A5FA",  // blue-400
+          2: "#A78BFA",  // violet-400
+          3: "#34D399"   // emerald-400
+        }
       }
-    },
+    }
   },
-  plugins: [],
-} satisfies Config;
+  plugins: []
+}
