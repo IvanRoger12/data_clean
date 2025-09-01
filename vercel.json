@@ -1,5 +1,5 @@
 {
-  "installCommand": "cd frontend && (npm ci || npm i)",
-  "buildCommand": "cd frontend && npm run build",
-  "outputDirectory": "frontend/dist"
+  "installCommand": "(npm ci || npm i)",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist"
 }
