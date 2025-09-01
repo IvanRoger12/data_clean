@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Test /api/openai</title>
+<style>
+  body { font-family: system-ui, sans-serif; padding: 24px; background: #0b1220; color: #e6e6e6 }
+  button { padding: 10px 16px; border: 0; border-radius: 8px; background: #2563eb; color: white; cursor: pointer }
+  pre { background: #0f172a; padding: 16px; border-radius: 8px; overflow:auto }
+  input, textarea { width:100%; padding:10px; margin:.5rem 0; border-radius:8px; border:1px solid #334155; background:#0f172a; color:#e6e6e6 }
+</style>
+
+<h1>Test API OpenAI</h1>
+<p>Ce bouton appelle <code>/api/openai</code> en POST, sans console.</p>
+
+<label>Question :</label>
+<input id="q" value="Dis bonjour.">
+
+<button id="btn">Envoyer</button>
+
+<h3>Réponse :</h3>
+<pre id="out">—</pre>
+
+<script>
+  const btn = document.getElementById('btn');
+  const out = document.getElementById('out');
+  btn.onclick = async () => {
+    out.textContent = 'Chargement...';
+    const q = document.getElementById('q').value || 'Dis bonjour.';
+    try {
+      const r = await fetch('/api/openai', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            { role: 'system', content: 'You are a concise data quality copilot.' },
+            { role: 'user', content: q }
+          ]
+        })
+      });
+      const json = await r.json();
+      out.textContent = JSON.stringify(json, null, 2);
+    } catch (e) {
+      out.textContent = 'Erreur: ' + (e?.message || e);
+    }
+  };
+</script>
