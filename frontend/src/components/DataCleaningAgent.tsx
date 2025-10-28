@@ -1,600 +1,767 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useEffect, useMemo, useRef, useState } from "react";
+// frontend/src/DataCleaningAgent.tsx
+import React, { useState, useMemo, useCallback } from 'react';
+import { useDropzone } from 'react-dropzone';
+import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
+import { CountryCode } from 'libphonenumber-js';
 import {
-  Upload, Download, FileText, BarChart3, Settings, CheckCircle, XCircle, AlertCircle,
-  Eye, Zap, TrendingUp, Users, DollarSign, Target, MessageSquare, Brain, Sparkles,
-  Shield, Bot, Network, Activity, Calendar, Play, Pause, Trash2
-} from "lucide-react";
-import { parseCSV, toCSV } from "../lib/csv";
-import { cleanDataset, DiffCell } from "../lib/cleaning";
+  BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell, Legend
+} from 'recharts';
 import {
-  computeQualityReport,
-  summarizeQualityReport,
-  pct
-} from "../lib/quality";
-import { listJobs, saveJob, clearJobs, getSchedule, saveSchedule } from "../lib/jobs";
-import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, PieChart, Pie, Cell } from "recharts";
+  UploadCloud, Check, X, FileDown, History, Zap, Brain, Calendar, ChevronDown, Loader2, Info, Linkedin, ShieldCheck, FileText, Download, Replace
+} from 'lucide-react';
 
-type Tab = "analyser" | "statistiques" | "planifier" | "jobs";
+import { 
+  processDataCleaning, 
+  getColumnTypes,
+  CleaningReport, 
+  RawData, 
+  ColTypeMap,
+  SemanticType 
+} from './lib/cleaning';
+import { 
+  qualityScoreV2, 
+  computeQualityReportBefore,
+  computeQualityReportAfter, 
+  QualityMetrics 
+} from './lib/quality';
 
-export default function DataCleanAgent() {
-  const [activeTab, setActiveTab] = useState<Tab>("analyser");
-  const [file, setFile] = useState<File | null>(null);
+// --- i18n (Internationalization) ---
+type Translations = {
+  [key: string]: {
+    // Header
+    heroTitle: string;
+    heroSubtitle: string;
+    localBadge: string;
+    shareLinkedIn: string;
+    // Tabs
+    tabAnalyze: string;
+    tabIntelligence: string;
+    tabSchedule: string;
+    tabJobs: string;
+    // Uploader
+    uploaderTitle: string;
+    uploaderSubtitle: string;
+    uploaderSecurity: string;
+    tryDemo: string;
+    countryCodeLabel: string;
+    countryFR: string;
+    countryUS: string;
+    countryGB: string;
+    // Options
+    imputeMissing: string;
+    removeDuplicates: string;
+    // Actions
+    validateAll: string;
+    downloadCSV: string;
+    downloadJSONL: string;
+    processing: string;
+    // Preview
+    previewTitle: string;
+    previewBefore: string;
+    previewAfter: string;
+    badgeDuplicate: string;
+    badgeInvalid: string;
+    badgeOutlier: string;
+    // Intelligence
+    kpiQualityScore: string;
+    kpiScoreBefore: string;
+    kpiScoreAfter: string;
+    kpiTotalCorrections: string;
+    kpiTotalDuplicates: string;
+    kpiTotalInvalids: string;
+    kpiRowsProcessed: string;
+    chartInvalidTitle: string;
+    chartValidityTitle: string;
+    chartLabelValid: string;
+    chartLabelInvalid: string;
+    outlierTitle: string;
+    outlierDesc: string;
+    // Placeholders
+    scheduleTitle: string;
+    scheduleDesc: string;
+    jobsTitle: string;
+    jobsDesc: string;
+  };
+};
 
-  // Raw & columns
-  const [rows, setRows] = useState<Record<string, string>[]>([]);
-  const [columns, setColumns] = useState<string[]>([]);
-
-  // Initial quality (before)
-  const [initialScore, setInitialScore] = useState<number>(0);
-
-  // Proposed fixes (preview)
-  const [proposalRows, setProposalRows] = useState<Record<string, string>[]>([]);
-  const [diffs, setDiffs] = useState<DiffCell[]>([]);
-  const [duplicates, setDuplicates] = useState<Set<number>>(new Set());
-  const [statsInvalid, setStatsInvalid] = useState<Record<string, number>>({});
-  const [finalScore, setFinalScore] = useState<number | null>(null);
-  const [impute, setImpute] = useState<boolean>(false);
-
-  // Schedule & jobs
-  const [jobs, setJobs] = useState(listJobs());
-  const [schedule, setSchedule] = useState(getSchedule());
-  const scheduleRef = useRef<number | undefined>(undefined);
-
-  // Validated data (after user clicks)
-  const [finalRows, setFinalRows] = useState<Record<string, string>[] | null>(null);
-  const [changeLog, setChangeLog] = useState<any[]>([]);
-
-  // =============== Helpers ===============
-
-  function computeInitialScore(data: Record<string, string>[]) {
-    const qr = computeQualityReport(data);
-    return qr.globalScore;
+const translations: Translations = {
+  en: {
+    heroTitle: "DataClean AI — Real data cleaning. Local. Private. Audited.",
+    heroSubtitle: "Domain-fixed emails, E.164 phones, ISO dates, deduplication, imputation, Quality Score.",
+    localBadge: "100% Local / No Cloud Upload",
+    shareLinkedIn: "Share on LinkedIn",
+    tabAnalyze: "Analyze",
+    tabIntelligence: "Intelligence",
+    tabSchedule: "Schedule",
+    tabJobs: "Jobs",
+    uploaderTitle: "Drop your files or click here",
+    uploaderSubtitle: "CSV, Excel, JSON, TXT (≤ 50 MB). Your data stays in your browser.",
+    uploaderSecurity: "Secure Local Processing",
+    tryDemo: "Try demo dataset",
+    countryCodeLabel: "Phone Country Hint",
+    countryFR: "France (FR)",
+    countryUS: "USA (US)",
+    countryGB: "UK (GB)",
+    imputeMissing: "Impute missing/invalid (median/mode)",
+    removeDuplicates: "Remove duplicates",
+    validateAll: "Validate Corrections",
+    downloadCSV: "Download Clean CSV",
+    downloadJSONL: "Download Audit Log (JSONL)",
+    processing: "Processing...",
+    previewTitle: "Preview (first 10 rows)",
+    previewBefore: "Before",
+    previewAfter: "After",
+    badgeDuplicate: "Duplicate",
+    badgeInvalid: "Invalid",
+    badgeOutlier: "Outlier",
+    kpiQualityScore: "Quality Score",
+    kpiScoreBefore: "Before",
+    kpiScoreAfter: "After",
+    kpiTotalCorrections: "Total Corrections",
+    kpiTotalDuplicates: "Total Duplicates",
+    kpiTotalInvalids: "Total Invalids",
+    kpiRowsProcessed: "Rows Processed",
+    chartInvalidTitle: "Top 7 Columns with Invalids",
+    chartValidityTitle: "Global Validity",
+    chartLabelValid: "Valid Cells",
+    chartLabelInvalid: "Invalid Cells",
+    outlierTitle: "Detected Outliers (by row index)",
+    outlierDesc: "These numeric values are statistically unusual (IQR method).",
+    scheduleTitle: "Schedule (Pro Feature)",
+    scheduleDesc: "This feature is not available in the MVP. In a 'Pro' version, you could schedule recurring cleaning jobs.",
+    jobsTitle: "Jobs History (Pro Feature)",
+    jobsDesc: "This feature is not available in the MVP. In a 'Pro' version, you would see a history of all your cleaning jobs.",
+  },
+  fr: {
+    heroTitle: "DataClean AI — Nettoyage de données VRAI. Local. Privé. Audité.",
+    heroSubtitle: "Emails corrigés (domaines), Téléphones E.164, Dates ISO, Déduplication, Imputation, Score Qualité.",
+    localBadge: "100% Local / Sans Upload",
+    shareLinkedIn: "Partager sur LinkedIn",
+    tabAnalyze: "Analyser",
+    tabIntelligence: "Intelligence",
+    tabSchedule: "Planifier",
+    tabJobs: "Jobs",
+    uploaderTitle: "Déposez vos fichiers ou cliquez ici",
+    uploaderSubtitle: "CSV, Excel, JSON, TXT (≤ 50 Mo). Vos données restent dans votre navigateur.",
+    uploaderSecurity: "Traitement local sécurisé",
+    tryDemo: "Essayer le jeu de démo",
+    countryCodeLabel: "Pays (pour téléphones)",
+    countryFR: "France (FR)",
+    countryUS: "USA (US)",
+    countryGB: "Royaume-Uni (GB)",
+    imputeMissing: "Imputer manquants/invalides (médiane/mode)",
+    removeDuplicates: "Supprimer les doublons",
+    validateAll: "Valider les corrections",
+    downloadCSV: "Télécharger CSV propre",
+    downloadJSONL: "Télécharger Log d'Audit (JSONL)",
+    processing: "Traitement...",
+    previewTitle: "Aperçu (10 premières lignes)",
+    previewBefore: "Avant",
+    previewAfter: "Après",
+    badgeDuplicate: "Doublon",
+    badgeInvalid: "Invalide",
+    badgeOutlier: "Outlier",
+    kpiQualityScore: "Score de Qualité",
+    kpiScoreBefore: "Avant",
+    kpiScoreAfter: "Après",
+    kpiTotalCorrections: "Corrections totales",
+    kpiTotalDuplicates: "Doublons totaux",
+    kpiTotalInvalids: "Invalides totaux",
+    kpiLignesTraitées: "Lignes traitées",
+    chartInvalidTitle: "Top 7 Colonnes avec invalides",
+    chartValidityTitle: "Validité Globale",
+    chartLabelValid: "Cellules valides",
+    chartLabelInvalid: "Cellules invalides",
+    outlierTitle: "Outliers Détectés (par index de ligne)",
+    outlierDesc: "Ces valeurs numériques sont statistiquement inhabituelles (méthode IQR).",
+    scheduleTitle: "Planifier (Fonction Pro)",
+    scheduleDesc: "Cette fonction n'est pas disponible dans le MVP. En version 'Pro', vous pourriez planifier des nettoyages récurrents.",
+    jobsTitle: "Historique des Jobs (Fonction Pro)",
+    jobsDesc: "Cette fonction n'est pas disponible dans le MVP. En version 'Pro', vous verriez l'historique de vos nettoyages.",
   }
+};
 
-  function computeProjectedScore(
-    data: Record<string, string>[],
-    ctx?: { outlierIdxByCol?: Record<string, Set<number>>; outlierCols?: string[] }
-  ) {
-    const qr = computeQualityReport(data, {
-      keyCol: "id",
-      outlierCols: ctx?.outlierCols,
-      outlierIdxByCol: ctx?.outlierIdxByCol
-    });
-    return qr.globalScore;
-  }
+// --- Composants UI "Futuristes" ---
 
-  // =============== Upload ===============
+const GlassCard: React.FC<{ children: React.ReactNode, className?: string }> = ({ children, className = '' }) => (
+  <div className={`bg-white/5 backdrop-blur-md border border-white/10 rounded-2xl shadow-lg ${className}`}>
+    {children}
+  </div>
+);
 
-  async function handleUpload(f: File) {
-    const data = await parseCSV(f);
-    if (!data.length) return;
+const NeonButton: React.FC<{
+  onClick: () => void;
+  children: React.ReactNode;
+  icon?: React.ElementType;
+  className?: string;
+  disabled?: boolean;
+}> = ({ onClick, children, icon: Icon, className = '', disabled = false }) => (
+  <button
+    onClick={onClick}
+    disabled={disabled}
+    className={`
+      flex items-center justify-center gap-2 px-4 py-2 rounded-lg font-semibold
+      text-white transition-all duration-300
+      bg-cyan-600 hover:bg-cyan-500
+      shadow-[0_0_15px_rgba(6,182,212,0.5)] hover:shadow-[0_0_25px_rgba(6,182,212,0.8)]
+      disabled:bg-gray-600 disabled:opacity-50 disabled:shadow-none
+      ${className}
+    `}
+  >
+    {Icon && <Icon size={18} />}
+    {children}
+  </button>
+);
 
-    setFile(f);
-    setRows(data);
-    setColumns(Object.keys(data[0]));
-    setFinalRows(null);
-    setFinalScore(null);
+const TabButton: React.FC<{
+  onClick: () => void;
+  children: React.ReactNode;
+  icon: React.ElementType;
+  isActive: boolean;
+}> = ({ onClick, children, icon: Icon, isActive }) => (
+  <button
+    onClick={onClick}
+    className={`
+      flex items-center gap-2 px-4 py-2 rounded-t-lg font-medium
+      transition-all duration-300
+      ${isActive
+        ? 'text-cyan-300 bg-white/10 border-b-2 border-cyan-400'
+        : 'text-gray-400 hover:text-white hover:bg-white/5'
+      }
+    `}
+  >
+    <Icon size={18} />
+    {children}
+  </button>
+);
 
-    // 1) Score initial
-    const s0 = computeInitialScore(data);
-    setInitialScore(s0);
+const StatCard: React.FC<{ title: string; value: string | number; subtitle?: string; className?: string }> = ({ title, value, subtitle, className = '' }) => (
+  <GlassCard className={`p-4 ${className}`}>
+    <div className="text-sm font-medium text-cyan-300 uppercase tracking-wider">{title}</div>
+    <div className="text-4xl font-bold text-white mt-1">{value}</div>
+    {subtitle && <div className="text-sm text-gray-400 mt-1">{subtitle}</div>}
+  </GlassCard>
+);
 
-    // 2) Proposition de corrections (réelles)
-    const cleaned = cleanDataset(data, { impute, defaultCountry: "FR" });
-    setProposalRows(cleaned.rowsFixed);
-    setDiffs(cleaned.diffs);
-    setDuplicates(cleaned.duplicates);
-    setStatsInvalid(cleaned.statsInvalid);
+const PrivacyBadge: React.FC<{ text: string, className?: string }> = ({ text, className = '' }) => (
+  <div className={`
+    inline-flex items-center gap-2 px-3 py-1
+    bg-emerald-900/50 border border-emerald-400/50 rounded-full
+    text-sm text-emerald-300 font-medium
+    ${className}
+  `}>
+    <ShieldCheck size={16} />
+    {text}
+  </div>
+);
 
-    // 3) Score projeté
-    const numCols = Object.entries(cleaned.colTypes)
-      .filter(([_, t]) => t === "number")
-      .map(([c]) => c);
-    const s1 = computeProjectedScore(cleaned.rowsFixed, {
-      outlierCols: numCols,
-      outlierIdxByCol: cleaned.outlierIdxByCol
-    });
-    setFinalScore(s1);
-
-    setActiveTab("analyser");
-  }
-
-  // =============== Validate ===============
-
-  function validateAll() {
-    if (!proposalRows.length) return;
-
-    // journal JSONL (cell-level)
-    const log = diffs.map(d => ({
-      row: d.rowIdx,
-      column: d.column,
-      old_value: d.before,
-      new_value: d.after,
-      rule: d.rule,
-      confidence: d.confidence,
-      ts: new Date().toISOString()
-    }));
-    setChangeLog(log);
-    setFinalRows(proposalRows);
-
-    // Job record
-    const now = Date.now();
-    const job = {
-      id: crypto.randomUUID(),
-      filename: file?.name ?? "dataset.csv",
-      startedAt: now - 1000,
-      finishedAt: now,
-      rows: proposalRows.length,
-      cols: columns.length,
-      scoreBefore: initialScore,
-      scoreAfter: finalScore ?? initialScore,
-      diffCount: diffs.length
-    };
-    saveJob(job as any);
-    setJobs(listJobs());
-  }
-
-  // =============== Downloads ===============
-
-  function downloadCSV() {
-    const data = finalRows ?? proposalRows;
-    if (!data.length) return;
-    const csv = toCSV(data);
-    const blob = new Blob(["\ufeff" + csv], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `dataclean_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  function downloadChangeLogJSONL() {
-    if (!changeLog.length) return;
-    const content = changeLog.map(l => JSON.stringify(l)).join("\n");
-    const blob = new Blob([content], { type: "application/jsonl" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `changes_${new Date().toISOString().slice(0, 10)}.jsonl`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  function downloadChangeLogCSV() {
-    if (!diffs.length) return;
-    const header = ["rowIdx", "column", "before", "after", "rule", "confidence"];
-    const lines = [header.join(",")].concat(
-      diffs.map(d =>
-        [d.rowIdx, d.column, JSON.stringify(d.before ?? ""), JSON.stringify(d.after ?? ""), d.rule, d.confidence].join(",")
-      )
-    );
-    const blob = new Blob(["\ufeff" + lines.join("\n")], { type: "text/csv;charset=utf-8;" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = `audit_${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  }
-
-  // =============== Scheduler (local demo) ===============
-
-  useEffect(() => {
-    if (scheduleRef.current) window.clearInterval(scheduleRef.current);
-    if (schedule.enabled) {
-      scheduleRef.current = window.setInterval(() => {
-        setSchedule((s) => {
-          const now = Date.now();
-          const shouldRun = !s.lastRun || (now - s.lastRun) > s.everyMinutes * 60 * 1000;
-          if (shouldRun && rows.length) {
-            const cleaned = cleanDataset(rows, { impute, defaultCountry: "FR" });
-            const numCols = Object.entries(cleaned.colTypes)
-              .filter(([_, t]) => t === "number")
-              .map(([c]) => c);
-            const s1 = computeProjectedScore(cleaned.rowsFixed, {
-              outlierCols: numCols,
-              outlierIdxByCol: cleaned.outlierIdxByCol
-            });
-
-            const job = {
-              id: crypto.randomUUID(),
-              filename: file?.name ?? "dataset.csv",
-              startedAt: now,
-              finishedAt: now + 400,
-              rows: cleaned.rowsFixed.length,
-              cols: Object.keys(cleaned.rowsFixed[0] ?? {}).length,
-              scoreBefore: computeInitialScore(rows),
-              scoreAfter: s1,
-              diffCount: cleaned.diffs.length
-            };
-            saveJob(job as any);
-            setJobs(listJobs());
-          }
-          const ns = { ...s, lastRun: now };
-          saveSchedule(ns);
-          return ns;
-        });
-      }, 10_000); // check toutes les 10s
-    }
-    return () => { if (scheduleRef.current) window.clearInterval(scheduleRef.current); };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [schedule.enabled, schedule.everyMinutes, rows, impute]);
-
-  // =============== Insights (charts) ===============
-
-  const invalidByColData = useMemo(() => {
-    return Object.entries(statsInvalid).map(([k, v]) => ({ column: k, invalid: v }));
-  }, [statsInvalid]);
-
-  const validVsInvalid = useMemo(() => {
-    const totalCells = rows.length * (columns.length || 1);
-    const invalid = Object.values(statsInvalid).reduce((a, b) => a + b, 0);
-    const valid = Math.max(0, totalCells - invalid);
-    return [
-      { name: "Valides", value: valid },
-      { name: "Invalides", value: invalid }
-    ];
-  }, [rows.length, columns.length, statsInvalid]);
-
-  // =============== UI ===============
-
+const TypeBadge: React.FC<{ type: SemanticType, onClick: () => void }> = ({ type, onClick }) => {
+  const colors: Record<SemanticType, string> = {
+    text: "bg-gray-600 text-gray-100",
+    number: "bg-blue-600 text-blue-100",
+    date: "bg-purple-600 text-purple-100",
+    email: "bg-green-600 text-green-100",
+    phone: "bg-yellow-600 text-yellow-100",
+    unknown: "bg-red-600 text-red-100"
+  };
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      {/* Header */}
-      <header className="sticky top-0 z-10 glass">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <div className="w-14 h-14 rounded-2xl bg-gradient-to-br from-blue-400 via-violet-500 to-emerald-400 flex items-center justify-center shadow-xl">
-              <Bot className="w-7 h-7 text-white" />
-            </div>
-            <div>
-              <h1 className="text-3xl font-black gradient-text">DataClean Agent</h1>
-              <p className="text-slate-300 font-semibold text-sm">IA Autonome • Nettoyage RÉEL • Audit & Score</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-3">
-            <span className="px-3 py-1 rounded-full text-xs font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">Agent opérationnel</span>
-            <a
-              href="https://ivan7889-dataclean-agent-back.hf.space"
-              target="_blank"
-              rel="noreferrer"
-              className="hidden md:flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-blue-500/20 text-blue-300 border border-blue-500/30"
+    <button onClick={onClick} className={`flex items-center gap-1 ${colors[type]} px-2 py-0.5 rounded text-xs font-semibold uppercase transition-transform hover:scale-105`}>
+      {type}
+      <ChevronDown size={14} />
+    </button>
+  );
+};
+
+// --- Composant Principal ---
+
+export function DataCleaningAgent() {
+  const [lang, setLang] = useState<'fr' | 'en'>('fr');
+  const [isLoading, setIsLoading] = useState(false);
+  const [originalData, setOriginalData] = useState<RawData[]>([]);
+  const [headers, setHeaders] = useState<string[]>([]);
+  const [colTypes, setColTypes] = useState<ColTypeMap>({});
+  
+  const [countryCode, setCountryCode] = useState<CountryCode>('FR');
+  const [options, setOptions] = useState({
+    imputeMissing: false,
+    removeDuplicates: false,
+  });
+  
+  const [activeTab, setActiveTab] = useState('analyze');
+  const [finalRows, setFinalRows] = useState<RawData[] | null>(null);
+  
+  // --- Traduction ---
+  const t = useCallback((key: keyof Translations['en']) => {
+    return translations[lang][key] || translations['en'][key];
+  }, [lang]);
+
+  // --- Handlers ---
+  const onDrop = useCallback((acceptedFiles: File[]) => {
+    if (acceptedFiles.length === 0) return;
+    setIsLoading(true);
+    setFinalRows(null);
+    const file = acceptedFiles[0];
+    
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      try {
+        const data = e.target?.result;
+        let parsedData: RawData[];
+        
+        if (file.name.endsWith('.csv') || file.name.endsWith('.txt')) {
+          const result = Papa.parse(data as string, { header: true, skipEmptyLines: true });
+          parsedData = result.data as RawData[];
+        } else if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+          const workbook = XLSX.read(data, { type: 'binary' });
+          const sheetName = workbook.SheetNames[0];
+          const worksheet = workbook.Sheets[sheetName];
+          parsedData = XLSX.utils.sheet_to_json(worksheet) as RawData[];
+        } else if (file.name.endsWith('.json')) {
+          parsedData = JSON.parse(data as string);
+        } else {
+          throw new Error("Format de fichier non supporté");
+        }
+
+        const newHeaders = Object.keys(parsedData[0] || {});
+        setHeaders(newHeaders);
+        setColTypes(getColumnTypes(newHeaders));
+        setOriginalData(parsedData);
+      } catch (err) {
+        console.error("Erreur de parsing:", err);
+        alert(`Erreur: ${err instanceof Error ? err.message : 'Parsing failed'}`);
+      }
+      setIsLoading(false);
+    };
+
+    if (file.name.endsWith('.xlsx') || file.name.endsWith('.xls')) {
+      reader.readAsBinaryString(file);
+    } else {
+      reader.readAsText(file);
+    }
+  }, []);
+
+  const { getRootProps, getInputProps, isDragActive } = useDropzone({
+    onDrop,
+    accept: {
+      'text/csv': ['.csv'],
+      'text/plain': ['.txt'],
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'],
+      'application/vnd.ms-excel': ['.xls'],
+      'application/json': ['.json'],
+    },
+    maxFiles: 1,
+  });
+
+  const loadDemo = async () => {
+    setIsLoading(true);
+    setFinalRows(null);
+    try {
+      const response = await fetch('/demo.csv');
+      const text = await response.text();
+      const result = Papa.parse(text, { header: true, skipEmptyLines: true });
+      const parsedData = result.data as RawData[];
+      
+      const newHeaders = Object.keys(parsedData[0] || {});
+      setHeaders(newHeaders);
+      setColTypes(getColumnTypes(newHeaders));
+      setOriginalData(parsedData);
+    } catch (err) {
+      console.error("Erreur chargement démo:", err);
+      alert("Impossible de charger le fichier de démo.");
+    }
+    setIsLoading(false);
+  };
+  
+  const handleTypeOverride = (header: string, newType: SemanticType) => {
+    setColTypes(prev => ({ ...prev, [header]: newType }));
+  };
+
+  // --- Moteur de Nettoyage (Memoized) ---
+  const cleaningReport = useMemo((): (CleaningReport & {
+    qualityBefore: { metrics: QualityMetrics, score: number };
+    qualityAfter: { metrics: QualityMetrics, score: number };
+  }) | null => {
+    if (originalData.length === 0) return null;
+    
+    setIsLoading(true);
+    
+    // Rapport "Avant"
+    const qualityBefore = computeQualityReportBefore(originalData, colTypes);
+    const scoreBefore = qualityScoreV2(qualityBefore.metrics);
+    
+    // Rapport "Après"
+    const report = processDataCleaning(originalData, colTypes, { ...options, countryCode });
+    const qualityAfter = computeQualityReportAfter(report);
+    const scoreAfter = qualityScoreV2(qualityAfter.metrics);
+    
+    // Note: setIsLoading(false) est délicat dans useMemo. 
+    // On va le faire dans un effet ou accepter un court délai.
+    // Pour cet UI, on va le laisser "isLoading" pendant le render.
+    // Hack pour enlever le loader après le calcul
+    Promise.resolve().then(() => setIsLoading(false));
+    
+    return {
+      ...report,
+      qualityBefore: { metrics: qualityBefore.metrics, score: scoreBefore },
+      qualityAfter: { metrics: qualityAfter.metrics, score: scoreAfter },
+    };
+  }, [originalData, colTypes, options, countryCode]);
+
+  // --- Actions ---
+  const handleValidate = () => {
+    if (!cleaningReport) return;
+    setFinalRows(cleaningReport.proposalRows);
+  };
+  
+  const downloadFile = (filename: string, content: string, mimeType: string) => {
+    const blob = new Blob([content], { type: mimeType });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleDownloadCSV = () => {
+    if (!cleaningReport) return;
+    const dataToExport = finalRows ?? cleaningReport.proposalRows;
+    const csv = Papa.unparse(dataToExport);
+    downloadFile('cleaned_data.csv', csv, 'text/csv;charset=utf-8;');
+  };
+  
+  const handleDownloadJSONL = () => {
+    if (!cleaningReport) return;
+    const jsonl = cleaningReport.diffs.map(log => JSON.stringify(log)).join('\n');
+    downloadFile('audit_log.jsonl', jsonl, 'application/jsonl;charset=utf-8;');
+  };
+
+  const handleShareLinkedIn = () => {
+    const text = `J'teste cet outil IA de Data Cleaning 🤯 - 100% local, il corrige les emails, normalise les téléphones en E.164, unifie les dates... Très propre ! #DataQuality #DataCleaning #Analytics #AI #React`;
+    const url = `https://www.linkedin.com/sharing/share-offsite/?url=${encodeURIComponent(window.location.href)}&summary=${encodeURIComponent(text)}`;
+    window.open(url, '_blank');
+  };
+  
+  // --- Données pour Graphiques ---
+  const chartData = useMemo(() => {
+    if (!cleaningReport) return { invalidBar: [], validityPie: [] };
+    
+    const invalidBar = Array.from(cleaningReport.invalidMap.entries())
+      .map(([col, indices]) => ({ col, invalids: indices.length }))
+      .sort((a, b) => b.invalids - a.invalids)
+      .slice(0, 7);
+      
+    const totalCells = cleaningReport.stats.rowCount * cleaningReport.stats.colCount;
+    const totalInvalids = cleaningReport.stats.invalids;
+    const validityPie = [
+      { name: t('chartLabelValid'), value: totalCells - totalInvalids },
+      { name: t('chartLabelInvalid'), value: totalInvalids },
+    ];
+    
+    return { invalidBar, validityPie };
+  }, [cleaningReport, t]);
+
+  const PIE_COLORS = ['#059669', '#DC2626']; // Vert Émeraude, Rouge
+
+  // --- Rendu ---
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-[#0B1220] to-[#0C1024] text-gray-200 font-sans p-4 md:p-8">
+      {/* --- Header --- */}
+      <header className="flex flex-col md:flex-row justify-between items-center mb-8">
+        <div className="text-center md:text-left">
+          <h1 className="text-3xl font-bold text-white">{t('heroTitle')}</h1>
+          <p className="text-cyan-300 mt-1">{t('heroSubtitle')}</p>
+          <div className="mt-2 flex gap-4 justify-center md:justify-start">
+            <PrivacyBadge text={t('localBadge')} />
+            <button
+              onClick={handleShareLinkedIn}
+              className="flex items-center gap-1.5 text-sm text-blue-400 hover:text-blue-300 transition-colors"
             >
-              <Shield className="w-4 h-4" /> Backend sécurisé
-            </a>
+              <Linkedin size={16} /> {t('shareLinkedIn')}
+            </button>
           </div>
         </div>
-        <nav className="border-t border-white/10">
-          <div className="max-w-7xl mx-auto px-6 flex">
-            {[
-              { id: "analyser", label: "Agent Analyste", icon: Bot },
-              { id: "statistiques", label: "Intelligence", icon: Brain },
-              { id: "planifier", label: "Planifier", icon: Calendar },
-              { id: "jobs", label: "Jobs", icon: Network },
-            ].map((t: any) => {
-              const Icon = t.icon;
-              const active = activeTab === t.id;
-              return (
-                <button
-                  key={t.id}
-                  onClick={() => setActiveTab(t.id)}
-                  className={`relative flex items-center gap-2 px-6 py-4 font-bold ${active ? 'text-white' : 'text-slate-400 hover:text-slate-200'}`}
-                >
-                  <Icon className="w-5 h-5" />{t.label}
-                  {active && <span className="absolute bottom-0 left-0 right-0 h-1 bg-gradient-to-r from-blue-400 via-violet-400 to-emerald-400 rounded-full" />}
-                </button>
-              );
-            })}
-          </div>
-        </nav>
+        <div className="flex gap-2 mt-4 md:mt-0">
+          <button onClick={() => setLang('fr')} className={`px-3 py-1 rounded ${lang === 'fr' ? 'bg-white/20 text-white' : 'text-gray-400 hover:bg-white/10'}`}>FR</button>
+          <button onClick={() => setLang('en')} className={`px-3 py-1 rounded ${lang === 'en' ? 'bg-white/20 text-white' : 'text-gray-400 hover:bg-white/10'}`}>EN</button>
+        </div>
       </header>
 
-      {/* Main */}
-      <main className="max-w-7xl mx-auto px-6 py-10 space-y-12">
+      {/* --- Tabs --- */}
+      <nav className="flex border-b border-white/10 mb-6">
+        <TabButton icon={Zap} isActive={activeTab === 'analyze'} onClick={() => setActiveTab('analyze')}>{t('tabAnalyze')}</TabButton>
+        <TabButton icon={Brain} isActive={activeTab === 'intelligence'} onClick={() => setActiveTab('intelligence')}>{t('tabIntelligence')}</TabButton>
+        <TabButton icon={Calendar} isActive={activeTab === 'schedule'} onClick={() => setActiveTab('schedule')}>{t('tabSchedule')}</TabButton>
+        <TabButton icon={History} isActive={activeTab === 'jobs'} onClick={() => setActiveTab('jobs')}>{t('tabJobs')}</TabButton>
+      </nav>
 
-        {activeTab === "analyser" && (
-          <section className="space-y-8">
-            {/* Uploader */}
-            {!rows.length && (
-              <div className="text-center glass rounded-3xl p-16 border-white/10">
-                <Upload className="w-24 h-24 text-blue-400 mx-auto mb-6" />
-                <h2 className="text-4xl font-black mb-3 gradient-text">Activez l’Agent IA</h2>
-                <p className="text-slate-300 mb-8 font-semibold">CSV recommandé • Nettoyage emails / téléphones (E.164) / dates ISO / nombres / doublons • Score qualité</p>
-                <label className="inline-flex items-center gap-3 px-6 py-3 bg-gradient-to-r from-blue-500 to-violet-500 rounded-2xl font-black cursor-pointer hover:scale-105 transition">
-                  <input type="file" accept=".csv,.txt" hidden onChange={(e) => e.target.files?.[0] && handleUpload(e.target.files[0])} />
-                  <Bot className="w-5 h-5" /> Importer un fichier
-                </label>
-                <div className="mt-6 flex items-center justify-center gap-4 text-sm text-slate-400">
-                  <Shield className="w-4 h-4" /> Local • Aucun envoi de données tiers
-                </div>
-              </div>
-            )}
-
-            {/* Aperçu + Scores */}
-            {rows.length > 0 && (
-              <>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                  <div className="glass rounded-3xl p-6">
-                    <h3 className="text-xl font-black mb-4">Score Qualité</h3>
-                    <div className="flex items-end gap-8">
-                      <div>
-                        <div className="text-5xl font-black text-white">{initialScore}%</div>
-                        <div className="text-slate-400 font-semibold">Avant</div>
-                      </div>
-                      <div className="text-3xl">→</div>
-                      <div>
-                        <div className="text-5xl font-black text-emerald-300">{finalScore ?? initialScore}%</div>
-                        <div className="text-slate-400 font-semibold">Après (proposé)</div>
-                      </div>
-                    </div>
-                    <div className="mt-4 text-slate-400 text-sm font-semibold">
-                      L’agent a détecté <span className="text-orange-300">{diffs.length}</span> corrections + <span className="text-violet-300">{Array.from(duplicates).length}</span> doublons.
-                    </div>
-                    <div className="mt-4 flex items-center gap-3">
-                      <label className="flex items-center gap-2">
-                        <input
-                          type="checkbox"
-                          checked={impute}
-                          onChange={(e) => {
-                            setImpute(e.target.checked);
-                            const cleaned = cleanDataset(rows, { impute: e.target.checked, defaultCountry: "FR" });
-                            setProposalRows(cleaned.rowsFixed);
-                            setDiffs(cleaned.diffs);
-                            setDuplicates(cleaned.duplicates);
-                            setStatsInvalid(cleaned.statsInvalid);
-                            const numCols = Object.entries(cleaned.colTypes)
-                              .filter(([_, t]) => t === "number")
-                              .map(([c]) => c);
-                            const s1 = computeProjectedScore(cleaned.rowsFixed, {
-                              outlierCols: numCols,
-                              outlierIdxByCol: cleaned.outlierIdxByCol
-                            });
-                            setFinalScore(s1);
-                          }}
-                        />
-                        <span className="text-sm text-slate-300 font-semibold">Imputation manquants (médiane/mode)</span>
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="glass rounded-3xl p-6">
-                    <h3 className="text-xl font-black mb-4">Infos Fichier</h3>
-                    <div className="grid grid-cols-2 gap-4 text-sm">
-                      <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20">
-                        <div className="text-slate-300 font-semibold">Lignes</div>
-                        <div className="text-2xl font-black">{rows.length}</div>
-                      </div>
-                      <div className="p-4 rounded-2xl bg-violet-500/10 border border-violet-500/20">
-                        <div className="text-slate-300 font-semibold">Colonnes</div>
-                        <div className="text-2xl font-black">{columns.length}</div>
-                      </div>
-                      <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
-                        <div className="text-slate-300 font-semibold">Corrections proposées</div>
-                        <div className="text-2xl font-black">{diffs.length}</div>
-                      </div>
-                      <div className="p-4 rounded-2xl bg-orange-500/10 border border-orange-500/20">
-                        <div className="text-slate-300 font-semibold">Doublons</div>
-                        <div className="text-2xl font-black">{Array.from(duplicates).length}</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* Table Avant/Après */}
-                <div className="glass rounded-3xl p-6">
-                  <div className="flex items-center justify-between mb-4">
-                    <h3 className="text-xl font-black">Aperçu (Avant / Après)</h3>
-                    <div className="flex gap-3">
-                      <button onClick={validateAll} className="px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-green-600 text-white font-black hover:scale-105 transition">
-                        Valider toutes les corrections
-                      </button>
-                      <button onClick={downloadCSV} className="px-4 py-2 rounded-xl bg-white/10 text-white font-bold border border-white/20">
-                        <Download className="w-4 h-4 inline mr-2" /> Télécharger CSV
-                      </button>
-                      <button onClick={downloadChangeLogCSV} className="px-4 py-2 rounded-xl bg-white/10 text-white font-bold border border-white/20">
-                        <FileText className="w-4 h-4 inline mr-2" /> Audit CSV
-                      </button>
-                      <button onClick={downloadChangeLogJSONL} className="px-4 py-2 rounded-xl bg-white/10 text-white font-bold border border-white/20">
-                        <FileText className="w-4 h-4 inline mr-2" /> Journal JSONL
-                      </button>
-                    </div>
-                  </div>
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-sm">
-                      <thead className="bg-slate-800">
-                        <tr>
-                          {columns.map((c) => (<th key={c} className="px-4 py-3 text-left font-black text-slate-200">{c}</th>))}
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-white/5">
-                        {(rows.slice(0, 5)).map((r, i) => (
-                          <tr key={i} className="hover:bg-white/5">
-                            {columns.map((c) => {
-                              const after = proposalRows[i]?.[c] ?? r[c];
-                              const changed = after !== r[c];
-                              const isDup = duplicates.has(i);
-                              return (
-                                <td key={c} className="px-4 py-3">
-                                  <div className={`inline-flex items-center gap-2 px-2 py-1 rounded-lg ${changed ? 'bg-emerald-500/15 border border-emerald-500/30' : ''}`}>
-                                    <span className={`${changed ? 'line-through text-slate-400' : ''}`}>{r[c] || <i className="text-red-300">manquant</i>}</span>
-                                    {changed && <span className="text-emerald-300 font-bold">→ {after || <i className="text-red-300">vide</i>}</span>}
-                                  </div>
-                                  {isDup && <div className="text-xs text-orange-300 mt-1">Doublon</div>}
-                                </td>
-                              );
-                            })}
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </>
-            )}
-          </section>
-        )}
-
-        {activeTab === "statistiques" && rows.length > 0 && (
-          <section className="space-y-8">
-            <div className="text-center">
-              <h2 className="text-4xl font-black gradient-text mb-2">Intelligence & Insights</h2>
-              <p className="text-slate-300 font-semibold">Colonnes à risque • Validité globale • Évolution score</p>
+      {/* --- Contenu des Onglets --- */}
+      
+      {/* ====== ONGLET ANALYSER ====== */}
+      {activeTab === 'analyze' && (
+        <section>
+          {/* --- Uploader --- */}
+          <GlassCard className="p-6">
+            <div 
+              {...getRootProps()} 
+              className={`
+                p-8 border-2 border-dashed rounded-2xl cursor-pointer
+                transition-colors duration-300 text-center
+                ${isDragActive 
+                  ? 'border-cyan-400 bg-cyan-900/30' 
+                  : 'border-gray-600 hover:border-cyan-500 hover:bg-white/5'
+                }
+              `}
+            >
+              <input {...getInputProps()} />
+              <UploadCloud size={48} className="mx-auto text-cyan-400" />
+              <p className="text-xl font-semibold text-white mt-4">{t('uploaderTitle')}</p>
+              <p className="text-gray-400 mt-1">{t('uploaderSubtitle')}</p>
             </div>
-
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              {/* Bar top invalid */}
-              <div className="glass rounded-3xl p-6">
-                <h3 className="text-lg font-black mb-4">Top colonnes à risque (invalides)</h3>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <BarChart data={invalidByColData.sort((a, b) => b.invalid - a.invalid).slice(0, 7)}>
-                      <XAxis dataKey="column" stroke="#94a3b8" />
-                      <YAxis stroke="#94a3b8" />
-                      <Tooltip />
-                      <Bar dataKey="invalid" />
-                    </BarChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* Pie valid/invalid */}
-              <div className="glass rounded-3xl p-6">
-                <h3 className="text-lg font-black mb-4">Validité globale</h3>
-                <div className="h-64">
-                  <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                      <Pie data={validVsInvalid} cx="50%" cy="50%" outerRadius={100} dataKey="value" nameKey="name" label>
-                        {validVsInvalid.map((_, index) => (<Cell key={`cell-${index}`} />))}
-                      </Pie>
-                      <Tooltip />
-                    </PieChart>
-                  </ResponsiveContainer>
-                </div>
-              </div>
-
-              {/* KPI */}
-              <div className="glass rounded-3xl p-6 grid gap-4 content-start">
-                <h3 className="text-lg font-black">KPI</h3>
-                <div className="grid grid-cols-2 gap-4">
-                  <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20">
-                    <div className="text-slate-300 text-sm">Score avant</div>
-                    <div className="text-2xl font-black">{initialScore}%</div>
-                  </div>
-                  <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/20">
-                    <div className="text-slate-300 text-sm">Score après</div>
-                    <div className="text-2xl font-black">{finalScore ?? initialScore}%</div>
-                  </div>
-                  <div className="p-4 rounded-2xl bg-violet-500/10 border border-violet-500/20">
-                    <div className="text-slate-300 text-sm">% cellules remplies</div>
-                    <div className="text-2xl font-black">
-                      {pct( computeQualityReport(rows).dimensions.completeness * 100 , 100)}%
-                    </div>
-                  </div>
-                  <div className="p-4 rounded-2xl bg-orange-500/10 border border-orange-500/20">
-                    <div className="text-slate-300 text-sm">Corrections</div>
-                    <div className="text-2xl font-black">{diffs.length}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          </section>
-        )}
-
-        {activeTab === "planifier" && (
-          <section className="space-y-6">
-            <div className="glass rounded-3xl p-6">
-              <h3 className="text-xl font-black mb-4">Planifier exécutions automatiques</h3>
-              <div className="flex flex-wrap items-center gap-4">
-                <label className="flex items-center gap-2 px-3 py-2 rounded-xl bg-white/10 border border-white/20">
-                  <input
-                    type="checkbox"
-                    checked={schedule.enabled}
-                    onChange={(e) => {
-                      const s = { ...schedule, enabled: e.target.checked };
-                      setSchedule(s); saveSchedule(s);
-                    }}
-                  />
-                  <span className="font-semibold">Activer</span>
-                </label>
-                <div className="flex items-center gap-2">
-                  <span className="text-slate-300">Toutes les</span>
-                  <input
-                    type="number"
-                    min={1}
-                    className="w-20 px-3 py-2 rounded-xl bg-slate-800 border border-white/10"
-                    value={schedule.everyMinutes}
-                    onChange={(e) => {
-                      const n = Math.max(1, Number(e.target.value || "60"));
-                      const s = { ...schedule, everyMinutes: n };
-                      setSchedule(s); saveSchedule(s);
-                    }}
-                  />
-                  <span className="text-slate-300">minutes</span>
-                </div>
-                <div className="text-slate-400 text-sm">
-                  Dernière exécution : {schedule.lastRun ? new Date(schedule.lastRun).toLocaleTimeString() : "—"}
-                </div>
-              </div>
-              <p className="text-slate-400 text-sm mt-3">
-                Le planificateur relance le dernier dataset chargé (local) et enregistre un Job. Pour une planification serveur, branchez vos endpoints (cron).
-              </p>
-            </div>
-          </section>
-        )}
-
-        {activeTab === "jobs" && (
-          <section className="space-y-6">
-            <div className="flex items-center justify-between">
-              <h3 className="text-2xl font-black">Jobs</h3>
-              <div className="flex items-center gap-3">
-                <button
-                  onClick={() => { clearJobs(); setJobs([]); }}
-                  className="px-3 py-2 rounded-xl bg-white/10 border border-white/20 text-red-300 font-bold"
+            
+            <div className="flex flex-col md:flex-row items-center justify-between mt-4 gap-4">
+              <NeonButton onClick={loadDemo} icon={FileText} className="bg-violet-600 hover:bg-violet-500 shadow-violet-500/50 hover:shadow-violet-500/80 w-full md:w-auto">
+                {t('tryDemo')}
+              </NeonButton>
+              
+              <div className="flex items-center gap-2">
+                <label htmlFor="country" className="text-sm font-medium text-gray-300">{t('countryCodeLabel')}:</label>
+                <select 
+                  id="country"
+                  value={countryCode}
+                  onChange={(e) => setCountryCode(e.target.value as CountryCode)}
+                  className="bg-white/10 border border-white/20 rounded-lg px-3 py-1.5 text-white focus:outline-none focus:ring-2 focus:ring-cyan-400"
                 >
-                  <Trash2 className="w-4 h-4 inline mr-2" /> Vider
-                </button>
+                  <option value="FR">{t('countryFR')}</option>
+                  <option value="US">{t('countryUS')}</option>
+                  <option value="GB">{t('countryGB')}</option>
+                </select>
+              </div>
+
+              <PrivacyBadge text={t('uploaderSecurity')} />
+            </div>
+          </GlassCard>
+
+          {/* --- Options & Actions --- */}
+          {cleaningReport && !isLoading && (
+            <GlassCard className="p-6 mt-6">
+              <div className="flex flex-col md:flex-row justify-between items-center gap-4">
+                <div className="flex gap-4 items-center">
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" id="impute" checked={options.imputeMissing} onChange={e => setOptions(o => ({...o, imputeMissing: e.target.checked}))} className="h-4 w-4 rounded text-cyan-500 bg-gray-700 border-gray-600 focus:ring-cyan-500" />
+                    <label htmlFor="impute" className="text-gray-200">{t('imputeMissing')}</label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <input type="checkbox" id="dedupe" checked={options.removeDuplicates} onChange={e => setOptions(o => ({...o, removeDuplicates: e.target.checked}))} className="h-4 w-4 rounded text-cyan-500 bg-gray-700 border-gray-600 focus:ring-cyan-500" />
+                    <label htmlFor="dedupe" className="text-gray-200">{t('removeDuplicates')}</label>
+                  </div>
+                </div>
+                
+                <div className="flex gap-2 flex-wrap justify-center">
+                  <NeonButton onClick={handleValidate} icon={Check} className="bg-emerald-600 hover:bg-emerald-500 shadow-emerald-500/50 hover:shadow-emerald-500/80">
+                    {t('validateAll')}
+                  </NeonButton>
+                  <NeonButton onClick={handleDownloadCSV} icon={Download} disabled={!cleaningReport}>
+                    {t('downloadCSV')}
+                  </NeonButton>
+                  <NeonButton onClick={handleDownloadJSONL} icon={FileDown} className="bg-gray-600 hover:bg-gray-500 shadow-gray-500/50 hover:shadow-gray-500/80">
+                    {t('downloadJSONL')}
+                  </NeonButton>
+                </div>
+              </div>
+            </GlassCard>
+          )}
+
+          {/* --- Loader --- */}
+          {isLoading && (
+            <div className="flex justify-center items-center gap-3 p-10 text-xl text-cyan-300">
+              <Loader2 size={24} className="animate-spin" />
+              {t('processing')}
+            </div>
+          )}
+
+          {/* --- Aperçu Avant/Après --- */}
+          {cleaningReport && !isLoading && (
+            <div className="mt-6">
+              <h3 className="text-xl font-semibold text-white mb-3">{t('previewTitle')}</h3>
+              <div className="overflow-x-auto">
+                <table className="w-full min-w-[1000px] border-collapse">
+                  <thead>
+                    <tr className="border-b border-white/20">
+                      {headers.map(h => (
+                        <th key={h} className="p-3 text-left text-sm font-semibold text-cyan-300 uppercase tracking-wider">
+                          <div className="flex items-center gap-2">
+                            {h}
+                            <TypeBadge 
+                              type={colTypes[h] || 'unknown'} 
+                              onClick={() => {
+                                // Simple dropdown (pourrait être un vrai menu)
+                                const newType = prompt(`New type for ${h} (text, number, date, email, phone):`, colTypes[h]) as SemanticType;
+                                if (newType && ['text', 'number', 'date', 'email', 'phone'].includes(newType)) {
+                                  handleTypeOverride(h, newType);
+                                }
+                              }} 
+                            />
+                          </div>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {cleaningReport.proposalRows.slice(0, 10).map((proposalRow, rowIdx) => {
+                      const originalRow = originalData[rowIdx];
+                      const isDuplicate = cleaningReport.duplicateIndices.has(rowIdx);
+                      
+                      return (
+                        <tr key={rowIdx} className={`border-b border-white/10 ${isDuplicate ? 'bg-red-900/20' : ''}`}>
+                          {headers.map(h => {
+                            const originalValue = originalRow ? String(originalRow[h] ?? '') : '';
+                            const proposalValue = proposalRow[h];
+                            const displayValue = String(proposalValue ?? '');
+                            
+                            const isChanged = originalValue !== displayValue;
+                            const isInvalid = cleaningReport.invalidMap.get(h)?.includes(rowIdx);
+                            const isOutlier = cleaningReport.outlierIdxByCol.get(h)?.includes(rowIdx);
+                            
+                            return (
+                              <td key={`${rowIdx}-${h}`} className="p-3 text-sm text-gray-200 font-mono whitespace-nowrap align-top">
+                                <div>
+                                  {isChanged && !isInvalid && (
+                                    <>
+                                      <del className="text-red-400/70">{originalValue}</del>
+                                      <br />
+                                      <ins className="text-emerald-400 no-underline">{displayValue}</ins>
+                                    </>
+                                  )}
+                                  {!isChanged && !isInvalid && (
+                                    <span>{displayValue}</span>
+                                  )}
+                                  {isInvalid && (
+                                     <>
+                                      <del className="text-red-400/70">{originalValue}</del>
+                                      <br />
+                                      <ins className="text-red-400 no-underline font-bold">{displayValue}</ins>
+                                    </>
+                                  )}
+                                </div>
+                                <div className="flex gap-1 mt-1">
+                                  {isDuplicate && <span className="text-xs bg-red-600 text-white px-1.5 py-0.5 rounded font-bold">{t('badgeDuplicate')}</span>}
+                                  {isInvalid && <span className="text-xs bg-yellow-600 text-black px-1.5 py-0.5 rounded font-bold">{t('badgeInvalid')}</span>}
+                                  {isOutlier && <span className="text-xs bg-purple-500 text-white px-1.5 py-0.5 rounded font-bold">{t('badgeOutlier')}</span>}
+                                </div>
+                              </td>
+                            );
+                          })}
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
               </div>
             </div>
-            <div className="glass rounded-3xl overflow-hidden">
-              <table className="w-full text-sm">
-                <thead className="bg-slate-800">
-                  <tr>
-                    <th className="px-4 py-3 text-left">Job</th>
-                    <th className="px-4 py-3 text-left">Fichier</th>
-                    <th className="px-4 py-3">Lignes</th>
-                    <th className="px-4 py-3">Score</th>
-                    <th className="px-4 py-3">Durée</th>
-                    <th className="px-4 py-3">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-white/10">
-                  {jobs.map(j => (
-                    <tr key={j.id} className="hover:bg-white/5">
-                      <td className="px-4 py-3">{j.id.slice(0, 8)}…</td>
-                      <td className="px-4 py-3">{j.filename}</td>
-                      <td className="px-4 py-3 text-center">{j.rows}</td>
-                      <td className="px-4 py-3 text-center">{j.scoreBefore}% → <span className="text-emerald-300 font-black">{j.scoreAfter}%</span></td>
-                      <td className="px-4 py-3 text-center">{Math.max(0, Math.round((j.finishedAt - j.startedAt) / 1000))}s</td>
-                      <td className="px-4 py-3 text-center">
-                        <button className="px-3 py-1 rounded-lg bg-blue-500/20 border border-blue-500/30 font-bold">Détails</button>
-                      </td>
-                    </tr>
-                  ))}
-                  {!jobs.length && (
-                    <tr><td colSpan={6} className="px-4 py-6 text-center text-slate-400">Aucun job pour l’instant</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </section>
-        )}
-      </main>
+          )}
+        </section>
+      )}
+      
+      {/* ====== ONGLET INTELLIGENCE ====== */}
+      {activeTab === 'intelligence' && (
+        <section>
+          {!cleaningReport && (
+            <GlassCard className="p-8 text-center text-gray-400">
+              <Brain size={48} className="mx-auto mb-4 text-cyan-500" />
+              {t('uploaderTitle')} {t('tabAnalyze')} {t('tabIntelligence')}.
+            </GlassCard>
+          )}
+          
+          {cleaningReport && !isLoading && (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+              <StatCard title={t('kpiQualityScore')} value={`${cleaningReport.qualityAfter.score}%`} subtitle={`${t('kpiScoreBefore')}: ${cleaningReport.qualityBefore.score}%`} className="lg:col-span-2" />
+              <StatCard title={t('kpiTotalCorrections')} value={cleaningReport.stats.corrections} />
+              <StatCard title={t('kpiTotalDuplicates')} value={cleaningReport.stats.duplicates} />
+              <StatCard title={t('kpiTotalInvalids')} value={cleaningReport.stats.invalids} />
+              <StatCard title={t('kpiRowsProcessed')} value={cleaningReport.stats.rowCount} />
+              
+              {/* --- Graphiques --- */}
+              <GlassCard className="p-6 md:col-span-2 lg:col-span-2">
+                <h3 className="text-lg font-semibold text-white mb-4">{t('chartInvalidTitle')}</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <BarChart data={chartData.invalidBar} margin={{ top: 0, right: 0, bottom: 0, left: -20 }}>
+                    <XAxis dataKey="col" stroke="#9ca3af" fontSize={12} />
+                    <YAxis stroke="#9ca3af" fontSize={12} />
+                    <Tooltip 
+                      contentStyle={{ backgroundColor: 'rgba(20, 30, 50, 0.8)', border: '1px solid #38bdf8', borderRadius: '8px' }}
+                      labelStyle={{ color: '#e0f2fe' }}
+                    />
+                    <Bar dataKey="invalids" fill="#f59e0b" radius={[4, 4, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              </GlassCard>
+              
+              <GlassCard className="p-6 md:col-span-2 lg:col-span-2">
+                <h3 className="text-lg font-semibold text-white mb-4">{t('chartValidityTitle')}</h3>
+                <ResponsiveContainer width="100%" height={300}>
+                  <PieChart>
+                    <Pie
+                      data={chartData.validityPie}
+                      dataKey="value"
+                      nameKey="name"
+                      cx="50%"
+                      cy="50%"
+                      outerRadius={100}
+                      fill="#8884d8"
+                    >
+                      {chartData.validityPie.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip
+                      contentStyle={{ backgroundColor: 'rgba(20, 30, 50, 0.8)', border: '1px solid #38bdf8', borderRadius: '8px' }}
+                    />
+                    <Legend />
+                  </PieChart>
+                </ResponsiveContainer>
+              </GlassCard>
 
-      {/* Footer */}
-      <footer className="border-t border-white/10 bg-black/20">
-        <div className="max-w-7xl mx-auto px-6 py-8 text-center">
-          <p className="text-slate-400 font-semibold">DataClean Agent IA © 2025 • Nettoyage de Données • Score Qualité • Validation Humaine</p>
-        </div>
-      </footer>
+              {/* --- Outliers --- */}
+              {cleaningReport.outlierIdxByCol.size > 0 && (
+                <GlassCard className="p-6 md:col-span-2 lg:col-span-4">
+                  <h3 className="text-lg font-semibold text-white mb-2">{t('outlierTitle')}</h3>
+                  <p className="text-sm text-gray-400 mb-4">{t('outlierDesc')}</p>
+                  <div className="max-h-60 overflow-y-auto font-mono text-sm">
+                    {Array.from(cleaningReport.outlierIdxByCol.entries()).map(([col, indices]) => (
+                      <div key={col} className="mb-2">
+                        <strong className="text-purple-300">{col}:</strong>
+                        <span className="text-gray-300 ml-2">{indices.join(', ')}</span>
+                      </div>
+                    ))}
+                  </div>
+                </GlassCard>
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ====== ONGLET PLANIFIER ====== */}
+      {activeTab === 'schedule' && (
+         <GlassCard className="p-8 text-center text-gray-400">
+            <Calendar size={48} className="mx-auto mb-4 text-cyan-500" />
+            <h2 className="text-2xl font-semibold text-white mb-2">{t('scheduleTitle')}</h2>
+            <p>{t('scheduleDesc')}</p>
+          </GlassCard>
+      )}
+
+      {/* ====== ONGLET JOBS ====== */}
+      {activeTab === 'jobs' && (
+         <GlassCard className="p-8 text-center text-gray-400">
+            <History size={48} className="mx-auto mb-4 text-cyan-500" />
+            <h2 className="text-2xl font-semibold text-white mb-2">{t('jobsTitle')}</h2>
+            <p>{t('jobsDesc')}</p>
+          </GlassCard>
+      )}
     </div>
   );
 }
