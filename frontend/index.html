@@ -2,10 +2,38 @@
 <html lang="fr">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
-    <title>DataClean Agent</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    
+    <!-- Titre -->
+    <title>DataClean AI — Nettoyage de données local et audité</title>
+
+    <!-- SEO & Partage LinkedIn/Twitter -->
+    <meta name="description" content="Nettoyez vos données (emails, téléphones E.164, dates ISO, nombres, doublons) en local, en quelques secondes. Journal d’audit exportable.">
+    <meta name="robots" content="index, follow">
+    
+    <!-- Open Graph (LinkedIn, Facebook) -->
+    <meta property="og:title" content="DataClean AI — Clean dirty data in seconds (Local, Private, Audited)" />
+    <meta property="og:description" content="E.164 phones, ISO dates, domain fixes, duplicates, imputation. 100% in your browser." />
+    <meta property="og:type" content="website" />
+    <!-- IMPORTANT: Mettez votre URL de production ici -->
+    <meta property="og:url" content="httpsT://YOUR_APP_URL.com" /> 
+    <meta property="og:image" content="https://YOUR_APP_URL.com/og-cover.png" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+
+    <!-- Twitter Card -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="DataClean AI — Clean dirty data in seconds (Local, Private, Audited)" />
+    <meta name="twitter:description" content="E.164 phones, ISO dates, domain fixes, duplicates, imputation. 100% in your browser." />
+    <meta name="twitter:image" content="https://YOUR_APP_URL.com/og-cover.png" />
+
+    <!-- Favicon -->
+    <link rel="icon" href="/favicon.ico" sizes="any">
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    
   </head>
-  <body>
+  <body class="bg-[#0B1220]"> <!-- Ajout du fond par défaut pour éviter le flash blanc -->
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
