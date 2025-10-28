@@ -1,0 +1,21 @@
+id,email,phone,birth,city,age,amount
+1,john.doe@gmial.com,(202) 555-0111,1990-01-01,New York,34,1 234,56
+2,alice.smith@example.com,06 12 34 56 78,02/03/1995,Paris,29,500.20
+3,bob.johnson@hotmal.com,+1-202-555-0112,04.05.1980,New York,44,10000
+4,bad-email@,,2024/01/32,London,22,750,00
+5,carol.white@yahoo.com,999-9999,10-12-2000, paris ,30,
+6,david.brown@outlok.com,+44 20 7946 0958,1988-05-20,London,36,99.9
+7,alice.smith@example.com,06 12 34 56 78,02/03/1995,Paris,29,500.20
+8,eve.davis@gmail.com,,1992/11/30,Berlin,32,1500
+9,frank.miller@gmal.com,2025550114,20/07/1975,New York,150,200.00
+10,grace.wilson@example.com,06.12.34.56.80,1998-02-15,Paris,26,
+11,henry.moore@gmail.com,0033 612345681,15/01/2001,Lyon,23,300,50
+12,ivan.taylor@example.co.uk,,31.12.1999,,25,50.0
+13,judy.king@example.com,202-555-0116,05/05/1993,Paris,31,
+14,kevin.wright@gmail.com,invalid-phone,1985-06-10,LONDON,39,120
+15,linda.hill@gmial.com,+1(202)555-0117,1991-09-09,New York,33,450
+16,mike.adams@example.com,06 12 34 56 82,1970/12/25,Lyon,54,800.75
+17,nancy.baker@hotmal.com,202 555 0118,1982-08-18,Paris,42,250
+18,oliver.clark@yahoo.com,,03/04/1996,Berlin,28,
+19,oliver.clark@yahoo.com,,03/04/1996,Berlin,28,
+20,paula.evans@gmail.com,+33 6 12 34 56 83,1994-10-22,Paris,30,600
