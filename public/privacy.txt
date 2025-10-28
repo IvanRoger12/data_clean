@@ -1,0 +1,3 @@
+Traitement 100% local dans votre navigateur.
+Aucune donnée n'est uploadée sur un serveur externe.
+Le journal d'audit est généré et exportable uniquement par vous.
